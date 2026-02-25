@@ -1,45 +1,19 @@
 import sys
-from PyQt6.QtWidgets import QApplication , QMainWindow , QWidget , QGridLayout , QFrame
+from PyQt6.QtWidgets import QApplication
+from gui.main_window import MainWindow
 
-app = QApplication(sys.argv)
+def load_stylesheet(app):
+    with open("styles//dark.qss","r")as f:
+        app.setStyleSheet(f.read())
 
-app.setStyleSheet("""
-QMainWindow {
-    background-color: #121212;
-}
 
-QFrame {
-    background-color: #1E1E1E;
-    border-radius: 10px;
-    padding: 10px;
-}
-""")
+if __name__ == "__main__":
+    app = QApplication(sys.argv)
 
-win = QMainWindow()
-win.setWindowTitle("PyQt6 window")
-win.setGeometry(100,100,400,400)
+    load_stylesheet(app)
 
-central_widget = QWidget()
-win.setCentralWidget(central_widget)
+    window = MainWindow()
+    window.show()
 
-layout = QGridLayout()
-central_widget.setLayout(layout)
+    sys.exit(app.exec())
 
-box1 = QFrame()
-box2 = QFrame()
-box3 = QFrame()
-box4 = QFrame()
-
-box1.setStyleSheet("background-color: red")
-box2.setStyleSheet("background-color: green")
-box3.setStyleSheet("background-color: blue")
-box4.setStyleSheet("background-color: yellow")
-
-layout.addWidget(box1,0,0)
-layout.addWidget(box2,0,1)
-layout.addWidget(box3,1,0)
-layout.addWidget(box4,1,1)
-
-win.show()
-
-sys.exit(app.exec())
