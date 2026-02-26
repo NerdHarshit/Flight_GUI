@@ -23,3 +23,15 @@ QPushButton {
 QPushButton:hover {
     background-color: #7B1FA2;
 }
+
+#DataCard {
+    background-color: #1E1E1E;
+    border-radius: 12px;
+    padding: 10px;
+}
+
+#CardTitle {
+    font-size: 16px;
+    font-weight: bold;
+    color: #BB86FC;
+}
