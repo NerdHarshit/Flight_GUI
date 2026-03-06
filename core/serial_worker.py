@@ -6,7 +6,7 @@ class SerialWorker(QThread):
     line_received = pyqtSignal(str)
     connection_error = pyqtSignal(str)
 
-    def __init__(self, port, baudrate=9600):
+    def __init__(self, port, baudrate=115200):
         super().__init__()
         self.port = port
         self.baudrate = baudrate

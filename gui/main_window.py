@@ -1,3 +1,5 @@
+from time import time
+
 from PyQt6.QtWidgets import QMainWindow , QWidget , QGridLayout , QVBoxLayout
 from gui.data_card import DataCard
 from core.serial_worker import SerialWorker
@@ -5,6 +7,7 @@ from core.packet_parser import PacketParser
 from core.calculations import CalculationsEngine
 from core.flight_buffer import FlightBuffer
 from gui.plots import LivePlot
+from gui.timeline_widget import TimelineWidget
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -24,19 +27,31 @@ class MainWindow(QMainWindow):
         self.calculations = CalculationsEngine()
         self.buffer = FlightBuffer()
 
-        self.start_serial("COM3")
+        self.start_serial("COM20")
+
+        self.timeline_widget = TimelineWidget()
+        self.main_layout.addWidget(self.timeline_widget)
+
+        self.packet_count =0
+        self.start_time = time()
 
     def start_serial(self, port):
-        self.serial_worker = SerialWorker(port, 9600)
+        self.serial_worker = SerialWorker(port, 115200)
         self.serial_worker.line_received.connect(self.process_line)
         self.serial_worker.start()
 
     def process_line(self, line):
 
         packet = PacketParser.parse(line)
+        
 
         if not packet:
             return
+        
+        self.packet_count +=1
+
+        elapsed = time() - self.start_time
+        rate = self.packet_count/elapsed if elapsed >0 else 0
 
         # Store packet
         self.buffer.add_packet(packet)
@@ -93,8 +108,30 @@ class MainWindow(QMainWindow):
         self.acc_plot.add_point("Ay", t, packet["Ay"])
         self.acc_plot.add_point("Az", t, packet["Az"])
 
+        self.gyro_card.update_value("Gx",packet["Gx"])
+        self.gyro_card.update_value("Gy",packet["Gy"])
+        self.gyro_card.update_value("Gz",packet["Gz"])
+
         # Height plot (Barometric)
         self.height_plot.add_point("H_baro", t, packet["H_baro"])
+
+        #timeline
+        self.timeline_widget.set_state(packet["FSM"])
+        
+        #telemetry
+        self.telemetry_card.update_value("Signal", packet["Signal"])
+        self.telemetry_card.update_value("Packets", packet["Counter"])
+
+        lost = self.buffer.get_packet_loss()
+        self.telemetry_card.update_value("Lost", lost)
+
+        total = packet["Counter"]
+        loss_percent = (lost / total * 100) if total > 0 else 0
+
+        self.telemetry_card.update_value("Loss %", round(loss_percent, 2))
+
+        rate = self.packet_count / (time() - self.start_time)
+        self.telemetry_card.update_value("Rate", round(rate, 1))
 
         
     def build_top_dashboard(self):
@@ -113,5 +150,7 @@ class MainWindow(QMainWindow):
         self.vel_card = DataCard("Velocity", ["Vx", "Vy", "Vz"])
         self.top_grid.addWidget(self.vel_card, 1, 1)
 
+        self.telemetry_card = DataCard("Telemetry",["Signal","Packets","Lost","Loss %","Rate"])
+        self.top_grid.addWidget(self.telemetry_card,0,2)
 
 

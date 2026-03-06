@@ -24,7 +24,9 @@ class CalculationsEngine:
 
         dt = (timestamp - self.last_timestamp) / 1000.0
 
-        if dt <= 0 or dt > 1:
+        dt = max(0.001, min(dt, 2))
+
+        if dt <= 0 or dt > 2:
             return self._output()
 
         ax = packet["Ax"]
