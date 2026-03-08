@@ -1,6 +1,6 @@
 from time import time
 
-from PyQt6.QtWidgets import QMainWindow , QWidget , QGridLayout , QVBoxLayout
+from PyQt6.QtWidgets import QMainWindow , QWidget , QGridLayout , QVBoxLayout , QHBoxLayout , QPushButton
 from gui.data_card import DataCard
 from core.serial_worker import SerialWorker
 from core.packet_parser import PacketParser
@@ -8,6 +8,8 @@ from core.calculations import CalculationsEngine
 from core.flight_buffer import FlightBuffer
 from gui.plots import LivePlot
 from gui.timeline_widget import TimelineWidget
+from core.csv_exporter import CSVExporter
+from gui.animation_widget import AnimationWindow
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -24,6 +26,9 @@ class MainWindow(QMainWindow):
 
         self.build_top_dashboard()
         self.build_plot_section()
+
+        self.anim_window = None
+
         self.calculations = CalculationsEngine()
         self.buffer = FlightBuffer()
 
@@ -31,6 +36,8 @@ class MainWindow(QMainWindow):
 
         self.timeline_widget = TimelineWidget()
         self.main_layout.addWidget(self.timeline_widget)
+
+        self.build_button_row()
 
         self.packet_count =0
         self.start_time = time()
@@ -133,6 +140,8 @@ class MainWindow(QMainWindow):
         rate = self.packet_count / (time() - self.start_time)
         self.telemetry_card.update_value("Rate", round(rate, 1))
 
+        if self.anim_window is not None:
+            self.anim_window.update_state(packet)
         
     def build_top_dashboard(self):
         self.top_grid = QGridLayout()
@@ -153,4 +162,57 @@ class MainWindow(QMainWindow):
         self.telemetry_card = DataCard("Telemetry",["Signal","Packets","Lost","Loss %","Rate"])
         self.top_grid.addWidget(self.telemetry_card,0,2)
 
+    
+    def build_button_row(self):
+        self.buttonRow = QHBoxLayout()
+        self.main_layout.addLayout(self.buttonRow)
 
+        self.checkpointButton = QPushButton("Save checkpoint",self)
+        self.checkpointButton.clicked.connect(self.Save_CheckPoint)
+
+        self.saveCSVButton = QPushButton("Download CSV",self)
+        self.saveCSVButton.clicked.connect(self.Download_CSV)
+
+        self.savePDFButton = QPushButton("Download PDF Report",self)
+        self.savePDFButton.clicked.connect(self.Download_PDF_report)
+
+        self.downloadAnimationButton = QPushButton("Download Animation",self)
+        self.downloadAnimationButton.clicked.connect(self.Download_animation)
+
+        self.connectButton = QPushButton("Connect Radio",self)
+        self.connectButton.clicked.connect(self.connect_to_radio)
+
+        self.viewanimButton = QPushButton("View Animation",self)
+        self.viewanimButton.clicked.connect(self.open_animation_window)
+
+        self.buttonRow.addWidget(self.checkpointButton)
+        self.buttonRow.addWidget(self.saveCSVButton)
+        self.buttonRow.addWidget(self.savePDFButton)
+        self.buttonRow.addWidget(self.downloadAnimationButton)
+        self.buttonRow.addWidget(self.viewanimButton)
+        self.buttonRow.addWidget(self.connectButton)
+
+
+    def Save_CheckPoint(self):
+        filename = CSVExporter.exportCheckPoint(self.buffer)
+
+        if(filename):
+            print("Checkpoint saved to:",filename)
+
+    def Download_CSV(self):
+        pass
+
+    def Download_PDF_report(self):
+        pass
+
+    def Download_animation(self):
+        pass
+
+    def open_animation_window(self):
+        if self.anim_window is None:
+            self.anim_window  = AnimationWindow()
+
+        self.anim_window.show()
+
+    def connect_to_radio(self):
+        pass
