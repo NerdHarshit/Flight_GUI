@@ -11,7 +11,7 @@ class PDFReport:
         acc_plot.save_plot("acc_plot.png")
         height_plot.save_plot("height_plot.png")
 
-        packets = buffer.packets #assumiing list of packets
+        packets = buffer.data #assumiing list of packets
 
         if not packets :
             print("No data for report")
@@ -51,9 +51,9 @@ class PDFReport:
         #add v logic later using calculations engine
 
         #location logic
-        launch = packets[0]
+        launch_pkt = packets[0]
         apogee_pkt = max(packets, key = lambda p: p["H_baro"])
-        landing = packets[-1]
+        landing_pkt = next((p for p in packets if p["FSM"] == 7), packets[-1])
 
         def maps_links(lat,lon):
             google_link = f"https://www.google.com/maps?q={lat},{lon}"
@@ -68,7 +68,8 @@ class PDFReport:
         pdf.add_page()
 
         try :
-            pdf.image("logo.png",x = 80,w=50)
+            pdf.image("Assets\\impulse_logo_black.png",x = 80,w=50)
+            #pdf.image("Assets\\svkm_logo.png",x=10,w=30)
         
         except:
             pass
@@ -111,9 +112,9 @@ class PDFReport:
 
             pdf.cell(0,6,f"{name} : {lat} , {lon}",ln=True,link=link)
 
-        add_location("Launch_site",launch)
-        add_location("Apogee_site",apogee)
-        add_location("Landing site",landing)
+        add_location("Launch_site",launch_pkt)
+        add_location("Apogee_site",apogee_pkt)
+        add_location("Landing site",landing_pkt)
 
         pdf.ln(5)
 
@@ -156,13 +157,13 @@ class PDFReport:
 
         pdf.cell(0,6,"DJS Impulse",ln=True)
 
-        pdf.cell(0, 6, "Instagram", link="https://instagram.com", ln=True)
-        pdf.cell(0, 6, "LinkedIn", link="https://linkedin.com", ln=True)
-        pdf.cell(0, 6, "YouTube", link="https://youtube.com", ln=True)
+        pdf.cell(0, 6, "Instagram", link="https://www.instagram.com/djs_impulse/", ln=True,)
+        pdf.cell(0, 6, "LinkedIn", link="https://www.linkedin.com/company/djs-impulse/", ln=True)
+        pdf.cell(0, 6, "YouTube", link="http://www.youtube.com/@DJSImpulse", ln=True)
 
         pdf.ln(5)
 
-        pdf.cell(0, 6, "Designed and coded by Harshit Pandya", align="R")
+        pdf.cell(0, 6, "Designed and coded by Harshit Pandya", align="R",link="https://github.com/NerdHarshit")
 
         pdf.output("flight_report.pdf")
 

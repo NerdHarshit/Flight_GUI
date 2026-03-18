@@ -1,4 +1,6 @@
+from dbm import error
 from time import time
+import serial.tools.list_ports
 
 from PyQt6.QtWidgets import QMainWindow , QWidget , QGridLayout , QVBoxLayout , QHBoxLayout , QPushButton,QScrollArea
 from PyQt6.QtCore import QTimer
@@ -13,6 +15,7 @@ from gui.timeline_widget import TimelineWidget
 from core.csv_exporter import CSVExporter
 from gui.animation_widget import AnimationWindow
 from core.pdf_generator import PDFReport
+from core.video_saver import VideoSaver
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -41,7 +44,7 @@ class MainWindow(QMainWindow):
         self.calculations = CalculationsEngine()
         self.buffer = FlightBuffer()
 
-        self.start_serial("COM20")
+        #self.start_serial("COM20")
 
         self.timeline_widget = TimelineWidget()
         self.main_layout.addWidget(self.timeline_widget)
@@ -58,19 +61,70 @@ class MainWindow(QMainWindow):
         self.monitor_timer.timeout.connect(self.check_signal_loss)
         self.monitor_timer.start(1000)
 
+        self.serial_connected = False
+        self.serial_timer = QTimer()
+        self.serial_timer.timeout.connect(self.try_connect_serial)
+        self.serial_timer.start(2000)#checks in 2 secs 
+
+    #-------end of init-------
+
+    def find_serial_ports(self):
+        ports = serial.tools.list_ports.comports()
+
+        #finding pico as a usb device
+        for port in ports:
+            print(port.device, port.description)
+            if "USB" in port.description or "Pico" in port.description or "Serial" in port.description:
+                return port.device
+            
+        return None
+    #------end of find serial ports-------
 
     def start_serial(self, port):
         self.serial_worker = SerialWorker(port, 115200)
         self.serial_worker.line_received.connect(self.process_line)
+        self.serial_worker.connection_error.connect(self.handle_serial_error)
+
         self.serial_worker.start()
+
+    #------end of start serial-------
+
+    def try_connect_serial(self):
+
+        if self.serial_connected:
+            return
+
+        port = self.find_serial_ports()
+
+        if port:
+            print("Connecting to:", port)
+
+            try:
+                self.start_serial(port)
+                self.serial_connected = True
+                print("Connected successfully!")
+            except Exception as e:
+                print("Connection failed:", e)
+    #------end of try connect serial-------
+
+    def handle_serial_error(self, error):
+        print("Serial error:", error)
+
+        self.serial_connected = False
+
+        # allow reconnect
+        if hasattr(self, "serial_worker"):
+            self.serial_worker.stop()
+    #------end of handle serial error-------
 
     def process_line(self, line):
 
+        #print("RAW",line)
         packet = PacketParser.parse(line)
         self.last_packet_time = time()
-        
 
         if not packet:
+            print("Failed to parse line..invalid packet:", line)
             return
         
         self.packet_count +=1
@@ -86,6 +140,8 @@ class MainWindow(QMainWindow):
 
         # Update UI
         self.update_ui(packet, processed)
+    
+    #------end of process line-------
 
     def build_plot_section(self):
 
@@ -113,6 +169,7 @@ class MainWindow(QMainWindow):
 
         self.plot_layout.addWidget(self.acc_plot, 0, 0)
         self.plot_layout.addWidget(self.height_plot, 0, 1)
+    #------end of build plot section-------
 
     def update_ui(self, packet, processed):
 
@@ -178,6 +235,8 @@ class MainWindow(QMainWindow):
         if packet["FSM"] == 7 and not self.auto_saved:
             print("Landing detected...autosaving data")
             self.auto_save_all()
+
+    #------end of update ui-------
         
     def build_top_dashboard(self):
         self.top_grid = QGridLayout()
@@ -204,6 +263,7 @@ class MainWindow(QMainWindow):
         self.flight_card = DataCard("Flight Stats", ["Time", "H_baro", "H_avg"])
         self.top_grid.addWidget(self.flight_card,1,2)
 
+    #------end of build top dashboard-------
     
     def build_button_row(self):
         self.buttonRow = QHBoxLayout()
@@ -234,22 +294,22 @@ class MainWindow(QMainWindow):
         self.buttonRow.addWidget(self.downloadAnimationButton)
         self.buttonRow.addWidget(self.viewanimButton)
         self.buttonRow.addWidget(self.connectButton)
-
+#------end of build button row-------
 
     def Save_CheckPoint(self):
         filename = CSVExporter.exportCheckPoint(self.buffer)
 
         if(filename):
             print("Checkpoint saved to:",filename)
-
+#------end of save checkpoint-------
     def Download_CSV(self):
         filename = CSVExporter.exportFullCSV(self.buffer)
         if filename:
             print("Full flight CSV saved:", filename)
-
+#------end of download csv-------
     def Download_PDF_report(self):
         PDFReport.generate(self.buffer,self.acc_plot,self.height_plot)
-
+#------end of download pdf report-------
     def Download_animation(self):
         if self.anim_window is None:
             self.anim_window = AnimationWindow()
@@ -272,26 +332,32 @@ class MainWindow(QMainWindow):
         else:
             self.downloadAnimationButton.setText("Download Animation")
             
-
+#------end of download animation-------
     def open_animation_window(self):
         if self.anim_window is None:
             self.anim_window  = AnimationWindow()
 
         self.anim_window.show()
-
+#------end of open animation window-------
     def download_graph(self):
         ts = int(time())
 
         self.acc_plot.save_plot(f"acc{ts}.png")
         self.height_plot.save_plot(f"height{ts}.png")
         print("Graphs saved")
-
+#------end of download graph-------
     def check_signal_loss(self):
-        if time() - self.last_packet_time > 6 and not self.auto_saved:
+        if time() - self.last_packet_time > 20 and not self.auto_saved:
             print("Lost signal ....auto saving progresss")
             self.auto_save_all()
-    
+    #------end of check signal loss-------
     def auto_save_all(self):
+
+        if self.auto_saved:
+            return
+        
+        self.auto_saved = True
+
         print("auto saving all data")
 
         self.Download_CSV()
@@ -303,10 +369,22 @@ class MainWindow(QMainWindow):
         self.Download_PDF_report()
         print("pdf report saved")
 
-        if self.anim_window:
-            self.anim_window.recording = False
-            self.anim_window.save_video()
+         # 🚀 VIDEO IN SEPARATE THREAD
+        if self.anim_window and self.anim_window.frames:
 
-        print("saved video")
+            print("Starting video save thread...")
 
-        self.auto_saved = True
+            self.video_thread = VideoSaver(self.anim_window.frames.copy())
+
+            self.video_thread.finished.connect(
+                lambda: print("Video saved successfully!")
+            )
+
+            self.video_thread.error.connect(
+                lambda e: print("Video error:", e)
+            )
+
+            self.video_thread.start()
+        print("video saved")
+
+#------end of auto save all-------

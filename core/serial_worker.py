@@ -1,5 +1,6 @@
 from PyQt6.QtCore import QThread, pyqtSignal
 import serial
+import serial.tools.list_ports
 
 
 class SerialWorker(QThread):
@@ -11,6 +12,7 @@ class SerialWorker(QThread):
         self.port = port
         self.baudrate = baudrate
         self.running = True
+
 
     def run(self):
         try:
