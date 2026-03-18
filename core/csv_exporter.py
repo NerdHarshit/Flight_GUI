@@ -83,5 +83,5 @@ class CSVExporter:
             for packet in buffer.data:
                 writer.writerow(packet)
 
-        print("file:{filename} exported")
+        print(f"file:{filename} exported")
         return filename

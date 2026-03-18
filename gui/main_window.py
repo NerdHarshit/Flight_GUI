@@ -1,6 +1,7 @@
 from time import time
 
 from PyQt6.QtWidgets import QMainWindow , QWidget , QGridLayout , QVBoxLayout , QHBoxLayout , QPushButton,QScrollArea
+from PyQt6.QtCore import QTimer
 
 from gui.data_card import DataCard
 from core.serial_worker import SerialWorker
@@ -11,6 +12,7 @@ from gui.plots import LivePlot
 from gui.timeline_widget import TimelineWidget
 from core.csv_exporter import CSVExporter
 from gui.animation_widget import AnimationWindow
+from core.pdf_generator import PDFReport
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -49,6 +51,14 @@ class MainWindow(QMainWindow):
         self.packet_count =0
         self.start_time = time()
 
+        self.last_packet_time = time()
+        self.auto_saved = False
+
+        self.monitor_timer = QTimer()
+        self.monitor_timer.timeout.connect(self.check_signal_loss)
+        self.monitor_timer.start(1000)
+
+
     def start_serial(self, port):
         self.serial_worker = SerialWorker(port, 115200)
         self.serial_worker.line_received.connect(self.process_line)
@@ -57,6 +67,7 @@ class MainWindow(QMainWindow):
     def process_line(self, line):
 
         packet = PacketParser.parse(line)
+        self.last_packet_time = time()
         
 
         if not packet:
@@ -163,6 +174,10 @@ class MainWindow(QMainWindow):
 
         if self.anim_window is not None:
             self.anim_window.update_state(packet)
+
+        if packet["FSM"] == 7 and not self.auto_saved:
+            print("Landing detected...autosaving data")
+            self.auto_save_all()
         
     def build_top_dashboard(self):
         self.top_grid = QGridLayout()
@@ -228,10 +243,12 @@ class MainWindow(QMainWindow):
             print("Checkpoint saved to:",filename)
 
     def Download_CSV(self):
-        pass
+        filename = CSVExporter.exportFullCSV(self.buffer)
+        if filename:
+            print("Full flight CSV saved:", filename)
 
     def Download_PDF_report(self):
-        pass
+        PDFReport.generate(self.buffer,self.acc_plot,self.height_plot)
 
     def Download_animation(self):
         if self.anim_window is None:
@@ -250,7 +267,7 @@ class MainWindow(QMainWindow):
             print("Frames captured:", len(self.anim_window.frames))
             self.anim_window.save_video()
 
-        if not self.anim_window.recording:
+        if self.anim_window.recording:
             self.downloadAnimationButton.setText("Stop & Save")
         else:
             self.downloadAnimationButton.setText("Download Animation")
@@ -268,3 +285,28 @@ class MainWindow(QMainWindow):
         self.acc_plot.save_plot(f"acc{ts}.png")
         self.height_plot.save_plot(f"height{ts}.png")
         print("Graphs saved")
+
+    def check_signal_loss(self):
+        if time() - self.last_packet_time > 6 and not self.auto_saved:
+            print("Lost signal ....auto saving progresss")
+            self.auto_save_all()
+    
+    def auto_save_all(self):
+        print("auto saving all data")
+
+        self.Download_CSV()
+        print("Csv saved")
+
+        self.download_graph()
+        print("graphs saved")
+
+        self.Download_PDF_report()
+        print("pdf report saved")
+
+        if self.anim_window:
+            self.anim_window.recording = False
+            self.anim_window.save_video()
+
+        print("saved video")
+
+        self.auto_saved = True
