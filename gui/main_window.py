@@ -1,6 +1,7 @@
 from time import time
 
-from PyQt6.QtWidgets import QMainWindow , QWidget , QGridLayout , QVBoxLayout , QHBoxLayout , QPushButton
+from PyQt6.QtWidgets import QMainWindow , QWidget , QGridLayout , QVBoxLayout , QHBoxLayout , QPushButton,QScrollArea
+
 from gui.data_card import DataCard
 from core.serial_worker import SerialWorker
 from core.packet_parser import PacketParser
@@ -18,16 +19,22 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("DJS Impulse Ground Station")
         self.setGeometry(100,100,500,400)
 
-        central_widget = QWidget()
-        self.setCentralWidget(central_widget)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        self.anim_window = None
+
+        container = QWidget()
+        scroll.setWidget(container)
+
+        self.setCentralWidget(scroll)
 
         self.main_layout = QVBoxLayout()
-        central_widget.setLayout(self.main_layout)
+        container.setLayout(self.main_layout)
 
         self.build_top_dashboard()
         self.build_plot_section()
 
-        self.anim_window = None
+        
 
         self.calculations = CalculationsEngine()
         self.buffer = FlightBuffer()
@@ -75,6 +82,7 @@ class MainWindow(QMainWindow):
         self.plot_layout = QGridLayout()
         self.main_layout.addLayout(self.plot_layout)
 
+
         # Acceleration Plot
         self.acc_plot = LivePlot(
             title="Acceleration vs Time",
@@ -88,6 +96,9 @@ class MainWindow(QMainWindow):
             curve_names=["H_baro"],
             y_label="Height (m)"
         )
+
+        self.acc_plot.setMinimumHeight(250)
+        self.height_plot.setMinimumHeight(250)
 
         self.plot_layout.addWidget(self.acc_plot, 0, 0)
         self.plot_layout.addWidget(self.height_plot, 0, 1)
@@ -140,12 +151,25 @@ class MainWindow(QMainWindow):
         rate = self.packet_count / (time() - self.start_time)
         self.telemetry_card.update_value("Rate", round(rate, 1))
 
+        t = packet["timestamp"]/1000.0
+
+        h_baro = packet["H_baro"]
+        h_gps = packet["H_gps"]
+        h_avg = (h_baro+h_gps)/2
+
+        self.flight_card.update_value("Time",round(t,2))
+        self.flight_card.update_value("H_baro",round(h_baro,2))
+        self.flight_card.update_value("H_avg",round(h_avg,2))
+
         if self.anim_window is not None:
             self.anim_window.update_state(packet)
         
     def build_top_dashboard(self):
         self.top_grid = QGridLayout()
         self.main_layout.addLayout(self.top_grid)
+        self.main_layout.setSpacing(12)
+        self.main_layout.setContentsMargins(10,10,10,10)
+        self.top_grid.setSpacing(10)
 
         self.acc_card = DataCard("Acceleration", ["Ax", "Ay", "Az"])
         self.top_grid.addWidget(self.acc_card, 0, 0)
@@ -161,6 +185,9 @@ class MainWindow(QMainWindow):
 
         self.telemetry_card = DataCard("Telemetry",["Signal","Packets","Lost","Loss %","Rate"])
         self.top_grid.addWidget(self.telemetry_card,0,2)
+
+        self.flight_card = DataCard("Flight Stats", ["Time", "H_baro", "H_avg"])
+        self.top_grid.addWidget(self.flight_card,1,2)
 
     
     def build_button_row(self):
@@ -178,6 +205,7 @@ class MainWindow(QMainWindow):
 
         self.downloadAnimationButton = QPushButton("Download Animation",self)
         self.downloadAnimationButton.clicked.connect(self.Download_animation)
+        
 
         self.connectButton = QPushButton("Connect Radio",self)
         self.connectButton.clicked.connect(self.connect_to_radio)
@@ -206,7 +234,27 @@ class MainWindow(QMainWindow):
         pass
 
     def Download_animation(self):
-        pass
+        if self.anim_window is None:
+            self.anim_window = AnimationWindow()
+            self.anim_window.show()
+        
+        #start recording
+        if not self.anim_window.recording:
+            print("recording started")
+            self.anim_window.frames = []
+            self.anim_window.recording = True
+
+        else:
+            print("saving video")
+            self.anim_window.recording = False
+            print("Frames captured:", len(self.anim_window.frames))
+            self.anim_window.save_video()
+
+        if not self.anim_window.recording:
+            self.downloadAnimationButton.setText("Stop & Save")
+        else:
+            self.downloadAnimationButton.setText("Download Animation")
+            
 
     def open_animation_window(self):
         if self.anim_window is None:

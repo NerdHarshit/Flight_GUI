@@ -24,8 +24,8 @@ QPushButton:hover {
     background-color: #7B1FA2;
 }
 
-#DataCard {
-    background-color: #1E1E1E;
+#Card {
+    background-color: #000000;
     border-radius: 12px;
     padding: 10px;
 }

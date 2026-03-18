@@ -6,7 +6,7 @@ class DataCard(QFrame):
     def __init__(self, title: str, fields: list[str]):
         super().__init__()
 
-        self.setObjectName("DataCard")
+        self.setObjectName("Card")#DataCard
 
         self.value_labels = {}
 
@@ -19,13 +19,6 @@ class DataCard(QFrame):
         self.title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.title_label.setObjectName("CardTitle")
         self.main_layout.addWidget(self.title_label)
-
-        # Divider line
-        self.divider = QFrame()
-        self.divider.setFrameShape(QFrame.Shape.HLine)
-        self.divider.setFrameShadow(QFrame.Shadow.Sunken)
-        self.divider.setStyleSheet("color:#FFFFFF;")
-        self.main_layout.addWidget(self.divider)
 
         # Grid for fields
         self.grid = QGridLayout()
