@@ -1,6 +1,6 @@
 import pyqtgraph as pg
 from PyQt6.QtWidgets import QFrame, QVBoxLayout
-
+import pyqtgraph.exporters
 
 class LivePlot(QFrame):
     def __init__(self, title="Live Plot", curve_names=None, y_label="Value"):
@@ -61,3 +61,8 @@ class LivePlot(QFrame):
             self.data[name]["x"].clear()
             self.data[name]["y"].clear()
             self.curves[name].setData([], [])
+
+    def save_plot(self,filename):
+        exporter = pg.exporters.ImageExporter(self.plot_widget.plotItem)
+        exporter.parameters()['width'] = 800
+        exporter.export(filename)

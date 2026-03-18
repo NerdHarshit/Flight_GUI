@@ -207,8 +207,8 @@ class MainWindow(QMainWindow):
         self.downloadAnimationButton.clicked.connect(self.Download_animation)
         
 
-        self.connectButton = QPushButton("Connect Radio",self)
-        self.connectButton.clicked.connect(self.connect_to_radio)
+        self.connectButton = QPushButton("Download Graph",self)
+        self.connectButton.clicked.connect(self.download_graph)
 
         self.viewanimButton = QPushButton("View Animation",self)
         self.viewanimButton.clicked.connect(self.open_animation_window)
@@ -262,5 +262,9 @@ class MainWindow(QMainWindow):
 
         self.anim_window.show()
 
-    def connect_to_radio(self):
-        pass
+    def download_graph(self):
+        ts = int(time())
+
+        self.acc_plot.save_plot(f"acc{ts}.png")
+        self.height_plot.save_plot(f"height{ts}.png")
+        print("Graphs saved")
