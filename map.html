@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Live Map</title>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <style>
+        body { margin: 0; padding: 0; }
+        #map { height: 100vh; width: 100vw; }
+    </style>
+</head>
+<body>
+    <div id="map"></div>
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script>
+        var map = L.map('map').setView([0, 0], 2);
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            maxZoom: 19,
+            attribution: '© OpenStreetMap'
+        }).addTo(map);
+
+        var rocketMarker = L.circleMarker([0, 0], {
+            color: 'red',
+            fillColor: '#f03',
+            fillOpacity: 1,
+            radius: 8
+        }).addTo(map);
+
+        var trajectory = L.polyline([], {color: 'purple', weight: 4}).addTo(map);
+
+        function updatePosition(lat, lon, alt) {
+            var newLatLng = new L.LatLng(lat, lon);
+            rocketMarker.setLatLng(newLatLng);
+            trajectory.addLatLng(newLatLng);
+            map.setView(newLatLng, 16);
+            rocketMarker.bindPopup("Alt: " + alt.toFixed(1) + "m").openPopup();
+        }
+    </script>
+</body>
+</html>

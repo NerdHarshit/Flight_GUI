@@ -1,390 +1,353 @@
-from dbm import error
 from time import time
-import serial.tools.list_ports
+import os
 
-from PyQt6.QtWidgets import QMainWindow , QWidget , QGridLayout , QVBoxLayout , QHBoxLayout , QPushButton,QScrollArea
-from PyQt6.QtCore import QTimer
+from PyQt6.QtWidgets import (
+    QMainWindow, QWidget, QGridLayout, QVBoxLayout, QHBoxLayout, 
+    QPushButton, QScrollArea, QLabel, QFrame, QRadioButton, QButtonGroup, QSizePolicy
+)
+from PyQt6.QtCore import QTimer, Qt
+from PyQt6.QtGui import QPixmap
 
 from gui.data_card import DataCard
-from core.serial_worker import SerialWorker
-from core.packet_parser import PacketParser
-from core.calculations import CalculationsEngine
-from core.flight_buffer import FlightBuffer
 from gui.plots import LivePlot
 from gui.timeline_widget import TimelineWidget
-from core.csv_exporter import CSVExporter
+from gui.gauge_widget import GaugeWidget
 from gui.animation_widget import AnimationWindow
+from gui.map_window import MapWindow
+
+from core.telemetry_manager import TelemetryManager, parse_csv_packet
+from core.controller_manager import ControllerManager
+from core.connection_manager import ConnectionManager
+from core.command_manager import CommandManager
+from core.network_manager import NetworkManager
+from core.mission_state import MissionStateManager
+from core.debug_manager import DebugManager
+from core.logging_manager import LoggingManager
 from core.pdf_generator import PDFReport
 from core.video_saver import VideoSaver
+
 
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-
         self.setWindowTitle("DJS Impulse Ground Station")
-        self.setGeometry(100,100,500,400)
+        self.setGeometry(100, 100, 1300, 800)
 
+        # --- Managers ---
+        self.telemetry_mgr = TelemetryManager()
+        self.controller_mgr = ControllerManager()
+        self.connection_mgr = ConnectionManager()
+        self.command_mgr = CommandManager(self.connection_mgr.write)
+        self.network_mgr = NetworkManager()
+        self.mission_state = MissionStateManager()
+        self.debug_mgr = DebugManager()
+        
+        self.anim_window = None
+        self.map_window = None
+        self.auto_saved = False
+
+        # --- Setup UI ---
+        self._build_ui()
+        self._connect_signals()
+        
+        # --- Timers ---
+        self.ui_timer = QTimer()
+        self.ui_timer.timeout.connect(self._update_ui_timer)
+        self.ui_timer.start(100)  # 10 Hz UI refresh
+        
+        self.debug_timer = QTimer()
+        self.debug_timer.timeout.connect(self._update_debug)
+        self.debug_timer.start(1000) # 1 Hz debug check
+
+    def _build_ui(self):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
-        self.anim_window = None
-
         container = QWidget()
         scroll.setWidget(container)
-
         self.setCentralWidget(scroll)
 
         self.main_layout = QVBoxLayout()
         container.setLayout(self.main_layout)
 
-        self.build_top_dashboard()
-        self.build_plot_section()
+        # 1. Top Strip (Timestamp, Debug, Toggle, Branding)
+        self._build_top_strip()
 
+        # 2. Middle Section (Gauges, Timeline, Buttons, Connection, Plots)
+        mid_layout = QGridLayout()
+        self.main_layout.addLayout(mid_layout)
         
+        # Left: Gauges
+        gauge_layout = QVBoxLayout()
+        self.gauge_acc = GaugeWidget("Acceleration", "m/s²", 100)
+        self.gauge_vel = GaugeWidget("Velocity", "m/s", 300)
+        self.gauge_alt = GaugeWidget("Altitude", "m", 3000)
+        gauge_layout.addWidget(self.gauge_alt)
+        gauge_layout.addWidget(self.gauge_acc)
+        gauge_layout.addWidget(self.gauge_vel)
+        mid_layout.addLayout(gauge_layout, 0, 0, 2, 1)
 
-        self.calculations = CalculationsEngine()
-        self.buffer = FlightBuffer()
-
-        #self.start_serial("COM20")
-
+        # Center Top: Timeline
         self.timeline_widget = TimelineWidget()
-        self.main_layout.addWidget(self.timeline_widget)
+        mid_layout.addWidget(self.timeline_widget, 0, 1)
 
-        self.build_button_row()
+        # Center Bottom: Control Buttons & Connection Panel
+        center_bot_layout = QHBoxLayout()
+        
+        btn_layout = QGridLayout()
+        self.btn_save_ckpt = QPushButton("Save Checkpoint")
+        self.btn_view_anim = QPushButton("View Animation")
+        self.btn_view_map = QPushButton("View Map")
+        self.btn_report = QPushButton("Download PDF Report")
+        self.btn_csv = QPushButton("Download CSV")
+        self.btn_anim_save = QPushButton("Download Animation")
+        
+        btn_layout.addWidget(self.btn_save_ckpt, 0, 0)
+        btn_layout.addWidget(self.btn_view_anim, 0, 1)
+        btn_layout.addWidget(self.btn_view_map, 1, 0)
+        btn_layout.addWidget(self.btn_report, 1, 1)
+        btn_layout.addWidget(self.btn_csv, 2, 0)
+        btn_layout.addWidget(self.btn_anim_save, 2, 1)
+        center_bot_layout.addLayout(btn_layout)
 
-        self.packet_count =0
-        self.start_time = time()
+        # Connection Panel
+        conn_frame = QFrame()
+        conn_frame.setObjectName("ConnectionPanel")
+        conn_layout = QVBoxLayout(conn_frame)
+        self.lbl_conn_status = QLabel("Radio: Disconnected")
+        self.lbl_conn_sig = QLabel("Signal Strength: -- dB | Loss: 0%")
+        self.lbl_conn_server = QLabel("Server: Off | Devices: 0")
+        self.btn_connect = QPushButton("Connect")
+        self.btn_disconnect = QPushButton("Disconnect")
+        conn_layout.addWidget(self.lbl_conn_status)
+        conn_layout.addWidget(self.lbl_conn_sig)
+        conn_layout.addWidget(self.lbl_conn_server)
+        
+        conn_btns = QHBoxLayout()
+        conn_btns.addWidget(self.btn_connect)
+        conn_btns.addWidget(self.btn_disconnect)
+        conn_layout.addLayout(conn_btns)
+        center_bot_layout.addWidget(conn_frame)
+        
+        mid_layout.addLayout(center_bot_layout, 1, 1)
 
-        self.last_packet_time = time()
-        self.auto_saved = False
+        # Right: Plots
+        plot_layout = QVBoxLayout()
+        self.acc_plot = LivePlot(title="Acceleration (m/s²)", curve_names=["Ax", "Ay", "Az"])
+        self.height_plot = LivePlot(title="Altitude (m)", curve_names=["Baro", "GPS"])
+        self.acc_plot.setMinimumHeight(200)
+        self.height_plot.setMinimumHeight(200)
+        plot_layout.addWidget(self.height_plot)
+        plot_layout.addWidget(self.acc_plot)
+        mid_layout.addLayout(plot_layout, 0, 2, 2, 1)
 
-        self.monitor_timer = QTimer()
-        self.monitor_timer.timeout.connect(self.check_signal_loss)
-        self.monitor_timer.start(1000)
+        # 3. Bottom Section (Data Cards)
+        bot_layout = QGridLayout()
+        self.card_attitude = DataCard("Attitude", ["Roll", "Pitch", "Yaw"])
+        self.card_gps = DataCard("GPS", ["Lat", "Lon", "Alt"])
+        self.card_power = DataCard("Power", ["Voltage", "Current"])
+        self.card_telemetry = DataCard("Telemetry", ["Rate", "Lost", "Latency"])
+        
+        bot_layout.addWidget(self.card_attitude, 0, 0)
+        bot_layout.addWidget(self.card_gps, 0, 1)
+        bot_layout.addWidget(self.card_power, 0, 2)
+        bot_layout.addWidget(self.card_telemetry, 0, 3)
+        self.main_layout.addLayout(bot_layout)
 
-        self.serial_connected = False
-        self.serial_timer = QTimer()
-        self.serial_timer.timeout.connect(self.try_connect_serial)
-        self.serial_timer.start(2000)#checks in 2 secs 
+    def _build_top_strip(self):
+        top_layout = QHBoxLayout()
+        
+        # Timestamp & Debug
+        time_debug_layout = QVBoxLayout()
+        self.lbl_timestamp = QLabel("Time: T+00:00.00")
+        self.lbl_timestamp.setStyleSheet("font-size: 16px; font-weight: bold; color: white;")
+        self.lbl_debug = QLabel("Status: Waiting for telemetry...")
+        self.lbl_debug.setStyleSheet("font-size: 14px; font-weight: bold; color: #FFD700;")
+        time_debug_layout.addWidget(self.lbl_timestamp)
+        time_debug_layout.addWidget(self.lbl_debug)
+        top_layout.addLayout(time_debug_layout)
+        
+        top_layout.addStretch()
 
-    #-------end of init-------
+        # Controller Switch
+        switch_frame = QFrame()
+        switch_frame.setObjectName("Card")
+        switch_layout = QHBoxLayout(switch_frame)
+        switch_layout.setContentsMargins(10, 5, 10, 5)
+        self.btn_grp = QButtonGroup(self)
+        self.radio_c1 = QRadioButton("C1")
+        self.radio_c2 = QRadioButton("C2")
+        self.radio_c1.setChecked(True)
+        self.radio_c1.setStyleSheet("color: white; font-weight: bold;")
+        self.radio_c2.setStyleSheet("color: white; font-weight: bold;")
+        self.btn_grp.addButton(self.radio_c1, 1)
+        self.btn_grp.addButton(self.radio_c2, 2)
+        switch_layout.addWidget(self.radio_c1)
+        switch_layout.addWidget(self.radio_c2)
+        top_layout.addWidget(switch_frame)
+        
+        top_layout.addStretch()
+        
+        # Branding Cards
+        brand_frame = QFrame()
+        brand_frame.setObjectName("LogoCard")
+        brand_layout = QHBoxLayout(brand_frame)
+        brand_layout.setContentsMargins(0,0,0,0)
+        
+        logo_label = QLabel()
+        if os.path.exists("Assets/impulse_logo_black.png"):
+            pixmap = QPixmap("Assets/impulse_logo_black.png").scaledToHeight(50, Qt.TransformationMode.SmoothTransformation)
+            logo_label.setPixmap(pixmap)
+        
+        text_label = QLabel("<b>Impulse Ground Station</b><br/>Designed by Harshit Pandya")
+        text_label.setStyleSheet("color: white; font-size: 12px; text-align: center;")
+        
+        brand_layout.addWidget(logo_label)
+        brand_layout.addWidget(text_label)
+        top_layout.addWidget(brand_frame)
+        
+        self.main_layout.addLayout(top_layout)
 
-    def find_serial_ports(self):
-        ports = serial.tools.list_ports.comports()
+    def _connect_signals(self):
+        self.connection_mgr.line_received.connect(self._process_line)
+        self.connection_mgr.connected.connect(lambda p: self.lbl_conn_status.setText(f"Radio: Connected ({p})"))
+        self.connection_mgr.disconnected.connect(lambda r: self.lbl_conn_status.setText(f"Radio: Disconnected"))
+        
+        self.btn_connect.clicked.connect(self.connection_mgr.connect)
+        self.btn_disconnect.clicked.connect(self.connection_mgr.disconnect)
+        
+        self.btn_grp.buttonClicked.connect(self._switch_controller)
+        
+        self.btn_save_ckpt.clicked.connect(lambda: LoggingManager.exportCheckPoint(self.telemetry_mgr))
+        self.btn_csv.clicked.connect(lambda: LoggingManager.exportFullCSV(self.telemetry_mgr))
+        self.btn_report.clicked.connect(lambda: PDFReport.generate(self.telemetry_mgr.buffer_a, self.acc_plot, self.height_plot))
+        
+        self.btn_view_anim.clicked.connect(self._open_animation)
+        self.btn_anim_save.clicked.connect(self._toggle_record_animation)
+        self.btn_view_map.clicked.connect(self._open_map)
+        
+        # Server starts automatically
+        self.network_mgr.start_server()
+        self.network_mgr.clients_updated.connect(self._update_server_clients)
 
-        #finding pico as a usb device
-        for port in ports:
-            print(port.device, port.description)
-            if "USB" in port.description or "Pico" in port.description or "Serial" in port.description:
-                return port.device
-            
-        return None
-    #------end of find serial ports-------
+    def _switch_controller(self, btn):
+        c = "A" if btn == self.radio_c1 else "B"
+        self.telemetry_mgr.switch_controller(c)
+        self.controller_mgr.switch(c)
+        # Clear plots to avoid jumping lines
+        self.acc_plot.clear()
+        self.height_plot.clear()
 
-    def start_serial(self, port):
-        self.serial_worker = SerialWorker(port, 115200)
-        self.serial_worker.line_received.connect(self.process_line)
-        self.serial_worker.connection_error.connect(self.handle_serial_error)
-
-        self.serial_worker.start()
-
-    #------end of start serial-------
-
-    def try_connect_serial(self):
-
-        if self.serial_connected:
-            return
-
-        port = self.find_serial_ports()
-
-        if port:
-            print("Connecting to:", port)
-
-            try:
-                self.start_serial(port)
-                self.serial_connected = True
-                print("Connected successfully!")
-            except Exception as e:
-                print("Connection failed:", e)
-    #------end of try connect serial-------
-
-    def handle_serial_error(self, error):
-        print("Serial error:", error)
-
-        self.serial_connected = False
-
-        # allow reconnect
-        if hasattr(self, "serial_worker"):
-            self.serial_worker.stop()
-    #------end of handle serial error-------
-
-    def process_line(self, line):
-
-        #print("RAW",line)
-        packet = PacketParser.parse(line)
-        self.last_packet_time = time()
-
+    def _process_line(self, line):
+        packet = parse_csv_packet(line)
         if not packet:
-            print("Failed to parse line..invalid packet:", line)
             return
+
+        self.telemetry_mgr.process_packet(packet)
+        self.controller_mgr.update(packet)
+        self.mission_state.update(packet)
+        self.network_mgr.broadcast(packet)
         
-        self.packet_count +=1
-
-        elapsed = time() - self.start_time
-        rate = self.packet_count/elapsed if elapsed >0 else 0
-
-        # Store packet
-        self.buffer.add_packet(packet)
-
-        # Run calculations
-        processed = self.calculations.update(packet)
-
-        # Update UI
-        self.update_ui(packet, processed)
-    
-    #------end of process line-------
-
-    def build_plot_section(self):
-
-        # Create container layout for plots
-        self.plot_layout = QGridLayout()
-        self.main_layout.addLayout(self.plot_layout)
-
-
-        # Acceleration Plot
-        self.acc_plot = LivePlot(
-            title="Acceleration vs Time",
-            curve_names=["Ax", "Ay", "Az"],
-            y_label="Acceleration (m/s²)"
-        )
-
-        # Height Plot (Barometric)
-        self.height_plot = LivePlot(
-            title="Barometric Height vs Time",
-            curve_names=["H_baro"],
-            y_label="Height (m)"
-        )
-
-        self.acc_plot.setMinimumHeight(250)
-        self.height_plot.setMinimumHeight(250)
-
-        self.plot_layout.addWidget(self.acc_plot, 0, 0)
-        self.plot_layout.addWidget(self.height_plot, 0, 1)
-    #------end of build plot section-------
-
-    def update_ui(self, packet, processed):
-
-        # Cards
-        self.acc_card.update_value("Ax", packet["Ax"])
-        self.acc_card.update_value("Ay", packet["Ay"])
-        self.acc_card.update_value("Az", packet["Az"])
-
-        self.vel_card.update_value("Vx", round(processed["Vx"], 2))
-        self.vel_card.update_value("Vy", round(processed["Vy"], 2))
-        self.vel_card.update_value("Vz", round(processed["Vz"], 2))
-
-        self.gps_card.update_value("Latitude", packet["Latitude"])
-        self.gps_card.update_value("Longitude", packet["Longitude"])
-        self.gps_card.update_value("Altitude", packet["H_gps"])
-
-        # Convert timestamp ms → seconds
-        t = packet["timestamp"] / 1000.0
-
-        # Acceleration plot
-        self.acc_plot.add_point("Ax", t, packet["Ax"])
-        self.acc_plot.add_point("Ay", t, packet["Ay"])
-        self.acc_plot.add_point("Az", t, packet["Az"])
-
-        self.gyro_card.update_value("Gx",packet["Gx"])
-        self.gyro_card.update_value("Gy",packet["Gy"])
-        self.gyro_card.update_value("Gz",packet["Gz"])
-
-        # Height plot (Barometric)
-        self.height_plot.add_point("H_baro", t, packet["H_baro"])
-
-        #timeline
-        self.timeline_widget.set_state(packet["FSM"])
-        
-        #telemetry
-        self.telemetry_card.update_value("Signal", packet["Signal"])
-        self.telemetry_card.update_value("Packets", packet["Counter"])
-
-        lost = self.buffer.get_packet_loss()
-        self.telemetry_card.update_value("Lost", lost)
-
-        total = packet["Counter"]
-        loss_percent = (lost / total * 100) if total > 0 else 0
-
-        self.telemetry_card.update_value("Loss %", round(loss_percent, 2))
-
-        rate = self.packet_count / (time() - self.start_time)
-        self.telemetry_card.update_value("Rate", round(rate, 1))
-
-        t = packet["timestamp"]/1000.0
-
-        h_baro = packet["H_baro"]
-        h_gps = packet["H_gps"]
-        h_avg = (h_baro+h_gps)/2
-
-        self.flight_card.update_value("Time",round(t,2))
-        self.flight_card.update_value("H_baro",round(h_baro,2))
-        self.flight_card.update_value("H_avg",round(h_avg,2))
-
-        if self.anim_window is not None:
+        # Pass to animation 
+        if self.anim_window:
             self.anim_window.update_state(packet)
+            
+        # Check landing
+        if self.mission_state.is_flight_complete() and not self.auto_saved:
+            self._auto_save()
 
-        if packet["FSM"] == 7 and not self.auto_saved:
-            print("Landing detected...autosaving data")
-            self.auto_save_all()
+    def _update_ui_timer(self):
+        packet = self.telemetry_mgr.last_packet
+        if not packet:
+            return
+            
+        active_telem = self.controller_mgr.get_active_telemetry(packet)
+        t = packet["time_ms"] / 1000.0
 
-    #------end of update ui-------
+        # Timeline & Time
+        self.lbl_timestamp.setText(f"Time: {self.mission_state.get_elapsed_formatted()}")
+        self.timeline_widget.set_state(active_telem["state"])
         
-    def build_top_dashboard(self):
-        self.top_grid = QGridLayout()
-        self.main_layout.addLayout(self.top_grid)
-        self.main_layout.setSpacing(12)
-        self.main_layout.setContentsMargins(10,10,10,10)
-        self.top_grid.setSpacing(10)
+        # Gauges
+        self.gauge_acc.set_value(active_telem["accel_magnitude"])
+        self.gauge_vel.set_value(active_telem["velocity"])
+        self.gauge_alt.set_value(active_telem["baro_alt"])
 
-        self.acc_card = DataCard("Acceleration", ["Ax", "Ay", "Az"])
-        self.top_grid.addWidget(self.acc_card, 0, 0)
+        # Plots
+        self.acc_plot.add_point("Ax", t, active_telem["ax"])
+        self.acc_plot.add_point("Ay", t, active_telem["ay"])
+        self.acc_plot.add_point("Az", t, active_telem["az"])
+        self.height_plot.add_point("Baro", t, active_telem["baro_alt"])
+        if "gps_alt" in active_telem:
+            self.height_plot.add_point("GPS", t, active_telem["gps_alt"])
 
-        self.gyro_card = DataCard("Gyroscope", ["Gx", "Gy", "Gz"])
-        self.top_grid.addWidget(self.gyro_card, 0, 1)
-
-        self.gps_card = DataCard("GPS", ["Latitude", "Longitude", "Altitude"])
-        self.top_grid.addWidget(self.gps_card, 1, 0)
-
-        self.vel_card = DataCard("Velocity", ["Vx", "Vy", "Vz"])
-        self.top_grid.addWidget(self.vel_card, 1, 1)
-
-        self.telemetry_card = DataCard("Telemetry",["Signal","Packets","Lost","Loss %","Rate"])
-        self.top_grid.addWidget(self.telemetry_card,0,2)
-
-        self.flight_card = DataCard("Flight Stats", ["Time", "H_baro", "H_avg"])
-        self.top_grid.addWidget(self.flight_card,1,2)
-
-    #------end of build top dashboard-------
-    
-    def build_button_row(self):
-        self.buttonRow = QHBoxLayout()
-        self.main_layout.addLayout(self.buttonRow)
-
-        self.checkpointButton = QPushButton("Save checkpoint",self)
-        self.checkpointButton.clicked.connect(self.Save_CheckPoint)
-
-        self.saveCSVButton = QPushButton("Download CSV",self)
-        self.saveCSVButton.clicked.connect(self.Download_CSV)
-
-        self.savePDFButton = QPushButton("Download PDF Report",self)
-        self.savePDFButton.clicked.connect(self.Download_PDF_report)
-
-        self.downloadAnimationButton = QPushButton("Download Animation",self)
-        self.downloadAnimationButton.clicked.connect(self.Download_animation)
+        # Data Cards
+        self.card_attitude.update_value("Roll", active_telem.get("roll", 0))
+        self.card_attitude.update_value("Pitch", active_telem.get("pitch", 0))
+        self.card_attitude.update_value("Yaw", active_telem.get("yaw", 0))
         
+        self.card_gps.update_value("Lat", active_telem.get("lat", 0))
+        self.card_gps.update_value("Lon", active_telem.get("lon", 0))
+        self.card_gps.update_value("Alt", active_telem.get("gps_alt", 0))
+        
+        self.card_power.update_value("Voltage", active_telem.get("voltage", 0))
+        self.card_power.update_value("Current", active_telem.get("current", 0))
+        
+        # Telemetry Card
+        self.card_telemetry.update_value("Rate", f"{self.telemetry_mgr.get_telemetry_rate():.1f} Hz")
+        self.card_telemetry.update_value("Lost", self.telemetry_mgr.active_buffer.get_packet_loss())
+        self.card_telemetry.update_value("Latency", f"{self.telemetry_mgr.get_latency_ms():.0f} ms")
+        
+        # Connection Panel
+        sig = packet.get("signal_strength", -1)
+        loss = packet.get("packet_loss_pct", 0)
+        self.lbl_conn_sig.setText(f"Signal Strength: {sig} dB | Loss: {loss:.1f}%")
+        
+        # Map update
+        if self.map_window and "lat" in active_telem and active_telem["lat"] != 0:
+            self.map_window.update_location(active_telem["lat"], active_telem["lon"], active_telem["gps_alt"])
 
-        self.connectButton = QPushButton("Download Graph",self)
-        self.connectButton.clicked.connect(self.download_graph)
+    def _update_debug(self):
+        msg = self.debug_mgr.evaluate(
+            self.telemetry_mgr.last_packet,
+            self.telemetry_mgr,
+            self.controller_mgr,
+            self.connection_mgr
+        )
+        self.lbl_debug.setText(f"Status: {msg.text}")
+        self.lbl_debug.setStyleSheet(f"font-size: 14px; font-weight: bold; color: {msg.color};")
 
-        self.viewanimButton = QPushButton("View Animation",self)
-        self.viewanimButton.clicked.connect(self.open_animation_window)
+    def _update_server_clients(self, clients):
+        status = "On" if self.network_mgr.is_running else "Off"
+        self.lbl_conn_server.setText(f"Server: {status} | Devices: {len(clients)}")
 
-        self.buttonRow.addWidget(self.checkpointButton)
-        self.buttonRow.addWidget(self.saveCSVButton)
-        self.buttonRow.addWidget(self.savePDFButton)
-        self.buttonRow.addWidget(self.downloadAnimationButton)
-        self.buttonRow.addWidget(self.viewanimButton)
-        self.buttonRow.addWidget(self.connectButton)
-#------end of build button row-------
-
-    def Save_CheckPoint(self):
-        filename = CSVExporter.exportCheckPoint(self.buffer)
-
-        if(filename):
-            print("Checkpoint saved to:",filename)
-#------end of save checkpoint-------
-    def Download_CSV(self):
-        filename = CSVExporter.exportFullCSV(self.buffer)
-        if filename:
-            print("Full flight CSV saved:", filename)
-#------end of download csv-------
-    def Download_PDF_report(self):
-        PDFReport.generate(self.buffer,self.acc_plot,self.height_plot)
-#------end of download pdf report-------
-    def Download_animation(self):
+    def _open_animation(self):
         if self.anim_window is None:
             self.anim_window = AnimationWindow()
-            self.anim_window.show()
-        
-        #start recording
+        self.anim_window.show()
+
+    def _toggle_record_animation(self):
+        if self.anim_window is None:
+            self._open_animation()
+            
         if not self.anim_window.recording:
-            print("recording started")
             self.anim_window.frames = []
             self.anim_window.recording = True
-
+            self.btn_anim_save.setText("Stop & Save Animation")
         else:
-            print("saving video")
             self.anim_window.recording = False
-            print("Frames captured:", len(self.anim_window.frames))
             self.anim_window.save_video()
+            self.btn_anim_save.setText("Download Animation")
 
-        if self.anim_window.recording:
-            self.downloadAnimationButton.setText("Stop & Save")
-        else:
-            self.downloadAnimationButton.setText("Download Animation")
-            
-#------end of download animation-------
-    def open_animation_window(self):
-        if self.anim_window is None:
-            self.anim_window  = AnimationWindow()
+    def _open_map(self):
+        if self.map_window is None:
+            self.map_window = MapWindow()
+        self.map_window.show()
 
-        self.anim_window.show()
-#------end of open animation window-------
-    def download_graph(self):
-        ts = int(time())
-
-        self.acc_plot.save_plot(f"acc{ts}.png")
-        self.height_plot.save_plot(f"height{ts}.png")
-        print("Graphs saved")
-#------end of download graph-------
-    def check_signal_loss(self):
-        if time() - self.last_packet_time > 20 and not self.auto_saved:
-            print("Lost signal ....auto saving progresss")
-            self.auto_save_all()
-    #------end of check signal loss-------
-    def auto_save_all(self):
-
+    def _auto_save(self):
         if self.auto_saved:
             return
-        
         self.auto_saved = True
-
-        print("auto saving all data")
-
-        self.Download_CSV()
-        print("Csv saved")
-
-        self.download_graph()
-        print("graphs saved")
-
-        self.Download_PDF_report()
-        print("pdf report saved")
-
-         # 🚀 VIDEO IN SEPARATE THREAD
-        if self.anim_window and self.anim_window.frames:
-
-            print("Starting video save thread...")
-
-            self.video_thread = VideoSaver(self.anim_window.frames.copy())
-
-            self.video_thread.finished.connect(
-                lambda: print("Video saved successfully!")
-            )
-
-            self.video_thread.error.connect(
-                lambda e: print("Video error:", e)
-            )
-
-            self.video_thread.start()
-        print("video saved")
-
-#------end of auto save all-------
+        LoggingManager.exportFullCSV(self.telemetry_mgr)
+        PDFReport.generate(self.telemetry_mgr.buffer_a, self.acc_plot, self.height_plot)
+        if self.anim_window and self.anim_window.recording:
+            self._toggle_record_animation()
