@@ -72,8 +72,27 @@ class DebugManager:
 
             # 7. Signal strength
             sig = packet.get("signal_strength", -1)
-            if 0 < sig < -90:
+            if sig != -1 and sig < -90:
                 issues.append((f"Weak signal: {sig}dB", "warning"))
+
+            # 8. GPS quality (AVIOPRO fields)
+            gps_sats = packet.get("gps_sats", -1)
+            if gps_sats >= 0 and gps_sats < 4:
+                issues.append((f"GPS: Only {gps_sats} sats", "warning"))
+            if packet.get("gps_stale", False):
+                issues.append(("GPS: Stale data", "warning"))
+
+        # 9. Status packet sensor health (AVIOPRO)
+        status = getattr(telemetry_mgr, 'last_status', None)
+        if status:
+            if not status.get("bmp_ok", True):
+                issues.append(("BMP sensor offline", "critical"))
+            if not status.get("bno_ok", True):
+                issues.append(("BNO sensor offline", "critical"))
+            if not status.get("sd_ok", True):
+                issues.append(("SD card failed", "warning"))
+            if not status.get("flash_ok", True):
+                issues.append(("Flash storage failed", "warning"))
 
         # Build final message
         if not issues:

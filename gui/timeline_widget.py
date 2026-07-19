@@ -8,8 +8,8 @@ class TimelineWidget(QWidget):
         super().__init__()
         self.setMinimumHeight(160)
         self.states = [
-            "BOOT", "TEST", "PAD", "ASCENT", 
-            "APOGEE", "DESCENT", "AEROBREAK", "IMPACT"
+            "BOOT", "TEST_MODE", "LAUNCH_PAD", "ASCENT", 
+            "PAYLOAD_SEP", "DESCENT", "IMPACT", "SAFE_MODE"
         ]
         self.current_state_index = 0
 

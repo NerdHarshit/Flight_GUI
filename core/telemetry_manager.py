@@ -109,26 +109,185 @@ def parse_binary_packet(data: bytes) -> Optional[dict]:
 def parse_csv_packet(line: str) -> Optional[dict]:
     """
     Parse CSV-formatted telemetry from Ground Pico.
-    Format: time_ms,A_ax,A_ay,A_az,A_gx,A_gy,A_gz,A_roll,A_pitch,A_yaw,
-            A_lat,A_lon,A_gps_alt,A_baro_alt,A_pressure,A_temperature,
-            A_voltage,A_current,A_state,A_apogee,
-            B_ax,B_ay,B_az,B_baro_alt,B_pressure,B_temperature,B_voltage,
-            B_state,B_apogee,system_flags,packet_id,signal_strength,packet_loss_pct
+    Supports:
+    - AVIOPRO V0 TELEM format: TELEM,Seq,MissionTime,State,...
+    - Legacy 14-field format
+    - Legacy 31+ field dual-controller format
     """
     try:
-        parts = line.strip().split(",")
+        line = line.strip()
 
-        # Support both old 14-field format and new 33-field format
+        # Ignore ground station info/warning messages
+        if line.startswith("GS_"):
+            return None
+
+        # STATUS packets are not telemetry — parsed separately
+        if line.startswith("STATUS,"):
+            return None
+
+        # AVIOPRO V0 telemetry format
+        if line.startswith("TELEM,"):
+            return _parse_aviopro_csv(line)
+
+        parts = line.split(",")
+
+        # Legacy formats
         if len(parts) == 14:
-            # Legacy format compatibility
             return _parse_legacy_csv(parts)
         elif len(parts) >= 31:
             return _parse_new_csv(parts)
-        else:
-            return None
+
+        return None
 
     except Exception:
         return None
+
+
+def parse_status_packet(line: str) -> Optional[dict]:
+    """Parse STATUS packet from Ground Pico AVIOPRO V0.
+    Format: STATUS,Marker,BmpOK,BnoOK,SdOK,FlashOK,LoraOK,GpsSearch,CtrlB,BattV,FlightNum,RSSI,SNR
+    """
+    try:
+        if not line.strip().startswith("STATUS,"):
+            return None
+
+        parts = line.strip().split(",")
+        if len(parts) < 13:
+            return None
+
+        return {
+            "marker": parts[1],
+            "bmp_ok": parts[2].strip() == "1",
+            "bno_ok": parts[3].strip() == "1",
+            "sd_ok": parts[4].strip() == "1",
+            "flash_ok": parts[5].strip() == "1",
+            "lora_ok": parts[6].strip() == "1",
+            "gps_searching": parts[7].strip() == "1",
+            "ctrl_b_alive": parts[8].strip() == "1",
+            "batt_v": float(parts[9]),
+            "flight_number": int(parts[10]),
+            "rssi": int(parts[11]),
+            "snr": float(parts[12]),
+            "_receive_time": time(),
+        }
+    except Exception:
+        return None
+
+
+def _parse_aviopro_csv(line: str) -> Optional[dict]:
+    """
+    Parse AVIOPRO V0 TELEM CSV format (single-controller, mirrored to A+B).
+    Format: TELEM,Seq,MissionTime,State,Alt,MaxAlt,AccelMag,Pitch,Roll,Yaw,
+            Temp,Press,Batt,Lat,Lon,GpsAlt,Sats,Stale,Launch,Apogee,Sep,Landed,RSSI,SNR
+    """
+    parts = line.split(",")
+    if len(parts) < 24:
+        return None
+
+    seq         = int(parts[1])
+    mission_time = float(parts[2])
+    state       = int(parts[3])
+    altitude    = float(parts[4])
+    max_alt     = float(parts[5])
+    accel_mag   = float(parts[6])
+    pitch       = float(parts[7])
+    roll        = float(parts[8])
+    yaw         = float(parts[9])
+    temperature = float(parts[10])
+    pressure    = float(parts[11])
+    batt_v      = float(parts[12])
+    gps_lat     = float(parts[13])
+    gps_lon     = float(parts[14])
+    gps_alt     = float(parts[15])
+    gps_sats    = int(parts[16])
+    gps_stale   = parts[17].strip() == "1"
+    launched    = parts[18].strip() == "1"
+    apogee_flag = parts[19].strip() == "1"
+    separated   = parts[20].strip() == "1"
+    landed      = parts[21].strip() == "1"
+    rssi        = int(parts[22])
+    snr         = float(parts[23])
+
+    # Build system flags from booleans
+    sys_flags = 0x03  # Both controllers alive (mirrored single-controller)
+    if not gps_stale and gps_sats >= 4:
+        sys_flags |= FLAG_GPS_LOCK
+    if separated:
+        sys_flags |= FLAG_PARACHUTE
+    sys_flags |= FLAG_SD_LOGGING | FLAG_FLASH_LOGGING  # Default on; STATUS overrides
+
+    packet = {
+        "time_ms": mission_time,
+
+        # Controller A — mapped from AVIOPRO single-controller data
+        "A_ax": accel_mag,   # Only magnitude available
+        "A_ay": 0.0,
+        "A_az": 0.0,
+        "A_gx": 0.0,         # No individual gyro data from AVIOPRO
+        "A_gy": 0.0,
+        "A_gz": 0.0,
+        "A_roll": roll,
+        "A_pitch": pitch,
+        "A_yaw": yaw,
+        "A_lat": gps_lat,
+        "A_lon": gps_lon,
+        "A_gps_alt": gps_alt,
+        "A_baro_alt": altitude,
+        "A_pressure": pressure,
+        "A_temperature": temperature,
+        "A_voltage": batt_v,
+        "A_current": 0.0,    # Not available in AVIOPRO packet
+        "A_state": state,
+        "A_apogee": apogee_flag,
+
+        # Controller B — mirror Controller A for single-controller test launch
+        "B_ax": accel_mag,
+        "B_ay": 0.0,
+        "B_az": 0.0,
+        "B_baro_alt": altitude,
+        "B_pressure": pressure,
+        "B_temperature": temperature,
+        "B_voltage": batt_v,
+        "B_state": state,
+        "B_apogee": apogee_flag,
+
+        # System
+        "system_flags": sys_flags,
+        "flags": parse_system_flags(sys_flags),
+        "packet_id": seq,
+        "crc": 0,
+        "signal_strength": rssi,
+        "snr": snr,
+        "packet_loss_pct": 0.0,
+        "_receive_time": time(),
+
+        # AVIOPRO-specific extras
+        "max_altitude_avionics": max_alt,
+        "gps_sats": gps_sats,
+        "gps_stale": gps_stale,
+        "launched": launched,
+        "separated": separated,
+        "landed": landed,
+        "accel_mag": accel_mag,
+
+        # Legacy compat keys (animation widget, PDF report)
+        "timestamp": mission_time,
+        "Ax": accel_mag,
+        "Ay": 0.0,
+        "Az": 0.0,
+        "H_baro": altitude,
+        "Latitude": gps_lat,
+        "Longitude": gps_lon,
+        "H_gps": gps_alt,
+        "Gx": roll,    # Map Euler angles → legacy gyro keys for animation
+        "Gy": pitch,
+        "Gz": yaw,
+        "FSM": state,
+        "Signal": rssi,
+        "Counter": seq,
+    }
+
+    return packet
 
 
 def _parse_legacy_csv(parts: list) -> dict:
@@ -302,6 +461,8 @@ class TelemetryManager:
         self._rate_window: List[float] = []
         self._rate_window_size = 50
 
+        self.last_status: Optional[dict] = None
+
     @property
     def active_buffer(self) -> ControllerBuffer:
         return self.buffer_a if self.active_controller == "A" else self.buffer_b
@@ -335,6 +496,10 @@ class TelemetryManager:
         b_acc = math.sqrt(packet.get("B_ax", 0)**2 + packet.get("B_ay", 0)**2 + packet.get("B_az", 0)**2)
         self.buffer_b.max_acceleration = max(self.buffer_b.max_acceleration, b_acc)
         self.buffer_b.max_altitude = max(self.buffer_b.max_altitude, packet.get("B_baro_alt", 0))
+
+    def process_status(self, status: dict):
+        """Store the latest STATUS packet from Ground Pico."""
+        self.last_status = status
 
     def get_telemetry_rate(self) -> float:
         """Compute packets per second."""

@@ -10,15 +10,11 @@ class MapWindow(QMainWindow):
         self.setGeometry(200, 200, 800, 600)
         
         self.browser = QWebEngineView()
-        
-        # We will create a simple HTML file for Leaflet
-        self.map_html_path = os.path.abspath("map.html")
-        self._create_map_html()
-        
-        self.browser.setUrl(QUrl.fromLocalFile(self.map_html_path))
         self.setCentralWidget(self.browser)
         
-    def _create_map_html(self):
+        self._load_map_html()
+        
+    def _load_map_html(self):
         html_content = """<!DOCTYPE html>
 <html>
 <head>
@@ -50,18 +46,22 @@ class MapWindow(QMainWindow):
 
         var trajectory = L.polyline([], {color: 'purple', weight: 4}).addTo(map);
 
+        var firstUpdate = true;
         function updatePosition(lat, lon, alt) {
             var newLatLng = new L.LatLng(lat, lon);
             rocketMarker.setLatLng(newLatLng);
             trajectory.addLatLng(newLatLng);
-            map.setView(newLatLng, 16);
-            rocketMarker.bindPopup("Alt: " + alt.toFixed(1) + "m").openPopup();
+            if (firstUpdate) {
+                map.setView(newLatLng, 16);
+                firstUpdate = false;
+            }
+            rocketMarker.bindPopup("Alt: " + alt.toFixed(1) + "m");
         }
     </script>
 </body>
-</html>"""
-        with open(self.map_html_path, "w") as f:
-            f.write(html_content)
+</html>
+"""
+        self.browser.setHtml(html_content, QUrl("http://localhost"))
 
     def update_location(self, lat, lon, alt):
         # Execute JS to update map

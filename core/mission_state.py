@@ -10,8 +10,8 @@ MISSION_STATES = {
     3: "ASCENT",
     4: "PAYLOAD_SEP",
     5: "DESCENT",
-    6: "AEROBREAK_RELEASE",
-    7: "IMPACT",
+    6: "IMPACT",
+    7: "SAFE_MODE",
 }
 
 STATE_COLORS = {
@@ -63,7 +63,7 @@ class MissionStateManager:
             self.apogee_time = time()
 
         # Track landing
-        if state_a == 7 and self.landing_time is None:
+        if state_a >= 6 and self.landing_time is None:
             self.landing_time = time()
 
     def get_state_for_controller(self, controller):
@@ -94,7 +94,7 @@ class MissionStateManager:
         return f"T+{mins:02d}:{secs:02d}.{ms:02d}"
 
     def is_flight_complete(self):
-        return self.current_state_a == 7 or self.current_state_b == 7
+        return self.current_state_a >= 6 or self.current_state_b >= 6
 
     def reset(self):
         self.current_state_a = 0

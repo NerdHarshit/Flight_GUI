@@ -15,7 +15,7 @@ from gui.gauge_widget import GaugeWidget
 from gui.animation_widget import AnimationWindow
 from gui.map_window import MapWindow
 
-from core.telemetry_manager import TelemetryManager, parse_csv_packet
+from core.telemetry_manager import TelemetryManager, parse_csv_packet, parse_status_packet
 from core.controller_manager import ControllerManager
 from core.connection_manager import ConnectionManager
 from core.command_manager import CommandManager
@@ -132,7 +132,7 @@ class MainWindow(QMainWindow):
 
         # Right: Plots
         plot_layout = QVBoxLayout()
-        self.acc_plot = LivePlot(title="Acceleration (m/s²)", curve_names=["Ax", "Ay", "Az"])
+        self.acc_plot = LivePlot(title="Acceleration Magnitude (m/s²)", curve_names=["AccMag"])
         self.height_plot = LivePlot(title="Altitude (m)", curve_names=["Baro", "GPS"])
         self.acc_plot.setMinimumHeight(200)
         self.height_plot.setMinimumHeight(200)
@@ -143,14 +143,16 @@ class MainWindow(QMainWindow):
         # 3. Bottom Section (Data Cards)
         bot_layout = QGridLayout()
         self.card_attitude = DataCard("Attitude", ["Roll", "Pitch", "Yaw"])
-        self.card_gps = DataCard("GPS", ["Lat", "Lon", "Alt"])
+        self.card_gps = DataCard("GPS", ["Lat", "Lon", "Alt", "Sats"])
         self.card_power = DataCard("Power", ["Voltage", "Current"])
         self.card_telemetry = DataCard("Telemetry", ["Rate", "Lost", "Latency"])
+        self.card_radio = DataCard("Radio", ["RSSI", "SNR"])
         
         bot_layout.addWidget(self.card_attitude, 0, 0)
         bot_layout.addWidget(self.card_gps, 0, 1)
         bot_layout.addWidget(self.card_power, 0, 2)
         bot_layout.addWidget(self.card_telemetry, 0, 3)
+        bot_layout.addWidget(self.card_radio, 0, 4)
         self.main_layout.addLayout(bot_layout)
 
     def _build_top_strip(self):
@@ -233,11 +235,33 @@ class MainWindow(QMainWindow):
         c = "A" if btn == self.radio_c1 else "B"
         self.telemetry_mgr.switch_controller(c)
         self.controller_mgr.switch(c)
-        # Clear plots to avoid jumping lines
+        self._rebuild_plots()
+
+    def _rebuild_plots(self):
         self.acc_plot.clear()
         self.height_plot.clear()
+        
+        buffer = self.telemetry_mgr.active_buffer.data
+        recent = buffer[-300:] if len(buffer) > 300 else buffer
+        
+        for packet in recent:
+            active_telem = self.controller_mgr.get_active_telemetry(packet)
+            t = packet["time_ms"] / 1000.0
+            self.acc_plot.add_point("AccMag", t, active_telem.get("accel_magnitude", 0))
+            self.height_plot.add_point("Baro", t, active_telem.get("baro_alt", 0))
+            if "gps_alt" in active_telem:
+                self.height_plot.add_point("GPS", t, active_telem["gps_alt"])
 
     def _process_line(self, line):
+        if line.startswith("STATUS,"):
+            status = parse_status_packet(line)
+            if status:
+                self.telemetry_mgr.process_status(status)
+            return
+
+        if line.startswith("GS_"):
+            return
+
         packet = parse_csv_packet(line)
         if not packet:
             return
@@ -263,6 +287,22 @@ class MainWindow(QMainWindow):
         active_telem = self.controller_mgr.get_active_telemetry(packet)
         t = packet["time_ms"] / 1000.0
 
+        # Telemetry Card (always update for Latency)
+        self.card_telemetry.update_value("Rate", f"{self.telemetry_mgr.get_telemetry_rate():.1f} Hz")
+        self.card_telemetry.update_value("Lost", self.telemetry_mgr.active_buffer.get_packet_loss())
+        self.card_telemetry.update_value("Latency", f"{self.telemetry_mgr.get_latency_ms():.0f} ms")
+        
+        # Connection Panel
+        sig = packet.get("signal_strength", -1)
+        loss = packet.get("packet_loss_pct", 0)
+        self.lbl_conn_sig.setText(f"Signal Strength: {sig} dB | Loss: {loss:.1f}%")
+
+        # Skip adding duplicate points to plots if data has stopped
+        pid = packet.get("packet_id")
+        if getattr(self, "_last_processed_pid", None) == pid:
+            return
+        self._last_processed_pid = pid
+
         # Timeline & Time
         self.lbl_timestamp.setText(f"Time: {self.mission_state.get_elapsed_formatted()}")
         self.timeline_widget.set_state(active_telem["state"])
@@ -273,9 +313,7 @@ class MainWindow(QMainWindow):
         self.gauge_alt.set_value(active_telem["baro_alt"])
 
         # Plots
-        self.acc_plot.add_point("Ax", t, active_telem["ax"])
-        self.acc_plot.add_point("Ay", t, active_telem["ay"])
-        self.acc_plot.add_point("Az", t, active_telem["az"])
+        self.acc_plot.add_point("AccMag", t, active_telem["accel_magnitude"])
         self.height_plot.add_point("Baro", t, active_telem["baro_alt"])
         if "gps_alt" in active_telem:
             self.height_plot.add_point("GPS", t, active_telem["gps_alt"])
@@ -288,19 +326,15 @@ class MainWindow(QMainWindow):
         self.card_gps.update_value("Lat", active_telem.get("lat", 0))
         self.card_gps.update_value("Lon", active_telem.get("lon", 0))
         self.card_gps.update_value("Alt", active_telem.get("gps_alt", 0))
+        self.card_gps.update_value("Sats", packet.get("gps_sats", 0))
         
         self.card_power.update_value("Voltage", active_telem.get("voltage", 0))
         self.card_power.update_value("Current", active_telem.get("current", 0))
         
-        # Telemetry Card
-        self.card_telemetry.update_value("Rate", f"{self.telemetry_mgr.get_telemetry_rate():.1f} Hz")
-        self.card_telemetry.update_value("Lost", self.telemetry_mgr.active_buffer.get_packet_loss())
-        self.card_telemetry.update_value("Latency", f"{self.telemetry_mgr.get_latency_ms():.0f} ms")
+        self.card_radio.update_value("RSSI", packet.get("signal_strength", 0))
+        self.card_radio.update_value("SNR", packet.get("snr", 0.0))
         
-        # Connection Panel
-        sig = packet.get("signal_strength", -1)
-        loss = packet.get("packet_loss_pct", 0)
-        self.lbl_conn_sig.setText(f"Signal Strength: {sig} dB | Loss: {loss:.1f}%")
+        # (Telemetry and connection panels moved up)
         
         # Map update
         if self.map_window and "lat" in active_telem and active_telem["lat"] != 0:
