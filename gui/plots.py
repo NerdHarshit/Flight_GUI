@@ -3,7 +3,7 @@ from PyQt6.QtWidgets import QFrame, QVBoxLayout
 import pyqtgraph.exporters
 
 class LivePlot(QFrame):
-    def __init__(self, title="Live Plot", curve_names=None, y_label="Value"):
+    def __init__(self, title="Live Plot", curve_names=None, y_label="Value", colors=None):
         super().__init__()
 
         if curve_names is None:
@@ -14,8 +14,8 @@ class LivePlot(QFrame):
 
         self.plot_widget = pg.PlotWidget()
         self.plot_widget.setTitle(title)
-        self.plot_widget.setBackground("#1E1E1E")
-        self.plot_widget.showGrid(x=True, y=True)
+        self.plot_widget.setBackground("#0b0c10")
+        self.plot_widget.showGrid(x=True, y=True, alpha=0.2)
         self.plot_widget.addLegend()
 
         # Axis labels
@@ -28,15 +28,16 @@ class LivePlot(QFrame):
         self.data = {}
         self.max_points = 300
 
-        colors = [
+        _default_colors = [
             (255, 80, 80),      # Red
             (80, 255, 80),      # Green
             (187, 134, 252),    # Purple
             (80, 180, 255),     # Blue
         ]
+        palette = colors if colors else _default_colors
 
         for i, name in enumerate(curve_names):
-            pen = pg.mkPen(color=colors[i % len(colors)], width=2)
+            pen = pg.mkPen(color=palette[i % len(palette)], width=2)
             self.curves[name] = self.plot_widget.plot(name=name, pen=pen)
             self.data[name] = {"x": [], "y": []}
 

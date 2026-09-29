@@ -1,6 +1,13 @@
-QMainWindow {
+/* ====================================================
+   AvioPro Ground Station — Dark Theme
+   ==================================================== */
+
+/* ── Base window ─────────────────────────────────── */
+QMainWindow, QWidget {
     background-color: #0b0c10;
     color: #c5c6c7;
+    font-family: "Inter", "Roboto", "Segoe UI", sans-serif;
+    font-size: 13px;
 }
 
 QScrollArea {
@@ -12,30 +19,74 @@ QScrollArea > QWidget > QWidget {
     background-color: transparent;
 }
 
-QFrame {
-    background-color: rgba(30, 33, 40, 0.6);
-    border: 1px solid rgba(187, 134, 252, 0.2);
+/* ── Cards / Panels ──────────────────────────────── */
+QFrame#Card {
+    background-color: rgba(20, 22, 28, 0.85);
+    border: 1px solid rgba(187, 134, 252, 0.18);
     border-radius: 12px;
 }
 
-QLabel {
-    color: #e0e6ed;
-    font-family: "Inter", "Roboto", "Segoe UI", sans-serif;
-    font-size: 14px;
+QFrame#Card:hover {
+    border: 1px solid rgba(187, 134, 252, 0.42);
+    background-color: rgba(25, 28, 35, 0.92);
 }
 
+/* ── Labels ──────────────────────────────────────── */
+QLabel {
+    color: #e0e6ed;
+    background: transparent;
+    border: none;
+}
+
+#CardTitle {
+    font-size: 11px;
+    font-weight: 800;
+    color: #BB86FC;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    padding-bottom: 3px;
+    border-bottom: 1px solid rgba(187, 134, 252, 0.2);
+    margin-bottom: 4px;
+    background: transparent;
+    border-radius: 0;
+}
+
+#FieldLabel {
+    color: #a0aab5;
+    font-size: 11px;
+    background: transparent;
+    border: none;
+}
+
+#ValueLabel {
+    font-weight: bold;
+    font-family: "Consolas", "Courier New", monospace;
+    font-size: 13px;
+    color: #ffffff;
+    background: transparent;
+    border: none;
+}
+
+/* ── Buttons ─────────────────────────────────────── */
 QPushButton {
-    background-color: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #8a2be2, stop:1 #4b0082);
+    background-color: qlineargradient(
+        x1:0, y1:0, x2:1, y2:1,
+        stop:0 #8a2be2, stop:1 #4b0082
+    );
     color: white;
     border-radius: 8px;
-    padding: 8px 16px;
+    padding: 7px 14px;
     font-weight: bold;
     font-family: "Inter", "Roboto", sans-serif;
-    border: 1px solid rgba(255, 255, 255, 0.1);
+    font-size: 12px;
+    border: 1px solid rgba(255, 255, 255, 0.08);
 }
 
 QPushButton:hover {
-    background-color: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #9b4de3, stop:1 #5c0099);
+    background-color: qlineargradient(
+        x1:0, y1:0, x2:1, y2:1,
+        stop:0 #9b4de3, stop:1 #5c0099
+    );
     border: 1px solid rgba(187, 134, 252, 0.5);
 }
 
@@ -43,54 +94,102 @@ QPushButton:pressed {
     background-color: #3a0066;
 }
 
-#Card {
-    background-color: rgba(20, 22, 28, 0.8);
-    border-radius: 14px;
-    border: 1px solid rgba(187, 134, 252, 0.15);
+QPushButton:disabled {
+    background-color: #2a2d35;
+    color: #555;
+    border: 1px solid #444;
 }
 
-#Card:hover {
-    border: 1px solid rgba(187, 134, 252, 0.5);
-    background-color: rgba(25, 28, 35, 0.9);
+QPushButton:checked {
+    background-color: qlineargradient(
+        x1:0, y1:0, x2:1, y2:1,
+        stop:0 #6a1bc2, stop:1 #3a0072
+    );
+    border: 1px solid rgba(187, 134, 252, 0.6);
 }
 
-#CardTitle {
-    font-size: 15px;
-    font-weight: 800;
-    color: #BB86FC;
-    text-transform: uppercase;
-    letter-spacing: 1px;
-    padding-bottom: 4px;
-    border-bottom: 1px solid rgba(187, 134, 252, 0.2);
-    margin-bottom: 8px;
-}
-
+/* ── Debug console ───────────────────────────────── */
 #DebugPanel {
-    background-color: rgba(10, 12, 16, 0.8);
-    border: 1px solid rgba(255, 255, 255, 0.1);
+    background-color: rgba(8, 10, 14, 0.92);
+    border: 1px solid rgba(255, 255, 255, 0.08);
     border-radius: 10px;
-    padding: 10px;
 }
 
+QTextEdit {
+    background-color: transparent;
+    color: #888;
+    border: none;
+    font-family: "Consolas", "Courier New", monospace;
+    font-size: 9px;
+}
+
+QScrollBar:vertical {
+    background: transparent;
+    width: 6px;
+    border-radius: 3px;
+}
+
+QScrollBar::handle:vertical {
+    background: rgba(187, 134, 252, 0.35);
+    border-radius: 3px;
+    min-height: 20px;
+}
+
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+    height: 0px;
+}
+
+/* ── Spin boxes ──────────────────────────────────── */
+QDoubleSpinBox, QSpinBox {
+    background: #1a1d24;
+    color: #fff;
+    border: 1px solid rgba(187, 134, 252, 0.3);
+    border-radius: 4px;
+    padding: 2px 4px;
+    font-size: 12px;
+}
+
+QDoubleSpinBox:focus, QSpinBox:focus {
+    border: 1px solid rgba(187, 134, 252, 0.7);
+}
+
+QDoubleSpinBox::up-button, QDoubleSpinBox::down-button,
+QSpinBox::up-button, QSpinBox::down-button {
+    width: 14px;
+    background: rgba(139, 43, 226, 0.4);
+    border: none;
+}
+
+QDoubleSpinBox::up-button:hover, QDoubleSpinBox::down-button:hover,
+QSpinBox::up-button:hover, QSpinBox::down-button:hover {
+    background: rgba(139, 43, 226, 0.7);
+}
+
+/* ── Tooltip ─────────────────────────────────────── */
+QToolTip {
+    background-color: #1a1d24;
+    color: #e0e6ed;
+    border: 1px solid rgba(187, 134, 252, 0.4);
+    border-radius: 6px;
+    padding: 4px 8px;
+    font-size: 11px;
+}
+
+/* ── Stacked widget / pages ──────────────────────── */
+QStackedWidget {
+    background-color: transparent;
+    border: none;
+}
+
+/* ── Logo / branding ─────────────────────────────── */
+#LogoCard {
+    background-color: transparent;
+    border: none;
+}
+
+/* ── Connection panel ────────────────────────────── */
 #ConnectionPanel {
     background-color: rgba(20, 22, 28, 0.8);
     border-radius: 14px;
     border: 1px solid rgba(187, 134, 252, 0.15);
-}
-
-#ValueLabel {
-    font-weight: bold;
-    font-family: "Consolas", "Courier New", monospace;
-    font-size: 16px;
-    color: #ffffff;
-}
-
-#FieldLabel {
-    color: #a0aab5;
-    font-size: 13px;
-}
-
-#LogoCard {
-    background-color: transparent;
-    border: none;
 }

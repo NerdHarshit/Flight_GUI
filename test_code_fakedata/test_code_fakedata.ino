@@ -127,8 +127,8 @@ void loop() {
         Serial.print(pitch, 1);                                 Serial.print(",");
         Serial.print(roll, 1);                                  Serial.print(",");
         Serial.print(yaw, 1);                                   Serial.print(",");
-        Serial.print(24.5f + (currentAltitude * -0.0065f), 1);  // Temperature drop simulation
-        Serial.print(1013.25f - (currentAltitude * 0.12f), 1);  // Barometric pressure drop simulation
+        Serial.print(24.5f + (currentAltitude * -0.0065f), 1);  Serial.print(","); // Temperature drop simulation
+        Serial.print(1013.25f - (currentAltitude * 0.12f), 1);  Serial.print(","); // Barometric pressure drop simulation
         Serial.print(batteryVoltage, 2);                        Serial.print(",");
         
         // Exact Fixed Location Requested: 18.99°N 72.81°E

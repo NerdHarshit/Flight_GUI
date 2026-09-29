@@ -1,5 +1,6 @@
 """
 Controller Manager — Dual-controller switching and state management.
+Controller B falls back to Controller A's values for fields B doesn't send.
 """
 from time import time
 import math
@@ -80,32 +81,71 @@ class ControllerManager:
         self.controller_b.update_from_packet(packet, "B")
 
     def get_active_telemetry(self, packet):
+        """Get telemetry for the active controller.
+        
+        Controller B falls back to Controller A's values for fields
+        B doesn't send (gyro, orientation, GPS, current), so the
+        operator always sees a real number — never a blank or zero
+        from a missing field.
+        """
         p = self.active
         state = self.active_state
+
+        # Fields that B sends — use active controller
+        ax = packet.get(f"{p}_ax", 0.0)
+        ay = packet.get(f"{p}_ay", 0.0)
+        az = packet.get(f"{p}_az", 0.0)
+
         result = {
-            "ax": packet.get(f"{p}_ax", 0.0),
-            "ay": packet.get(f"{p}_ay", 0.0),
-            "az": packet.get(f"{p}_az", 0.0),
+            # Acceleration — B sends these
+            "ax": ax,
+            "ay": ay,
+            "az": az,
+            "accel_magnitude": state.get_accel_magnitude(packet, p),
+
+            # Barometric altitude — B sends this
             "baro_alt": packet.get(f"{p}_baro_alt", 0.0),
+
+            # Environment — B sends these
             "pressure": packet.get(f"{p}_pressure", 0.0),
             "temperature": packet.get(f"{p}_temperature", 0.0),
+
+            # Battery — B sends voltage only
             "voltage": packet.get(f"{p}_voltage", 0.0),
+
+            # State — B sends these
             "state": packet.get(f"{p}_state", 0),
             "apogee": packet.get(f"{p}_apogee", False),
+
+            # Computed values from active controller
             "velocity": state.get_velocity_magnitude(),
-            "accel_magnitude": state.get_accel_magnitude(packet, p),
+            "vx": state.vx,
+            "vy": state.vy,
+            "vz": state.vz,
             "max_altitude": state.max_alt,
             "max_acceleration": state.max_accel,
+
+            # --- Fields B does NOT send: always fall back to A ---
+            # Gyroscope
             "gx": packet.get("A_gx", 0.0),
             "gy": packet.get("A_gy", 0.0),
             "gz": packet.get("A_gz", 0.0),
+
+            # Orientation (Euler angles)
             "roll": packet.get("A_roll", 0.0),
             "pitch": packet.get("A_pitch", 0.0),
             "yaw": packet.get("A_yaw", 0.0),
+
+            # GPS — only A has this
             "lat": packet.get("A_lat", 0.0),
             "lon": packet.get("A_lon", 0.0),
             "gps_alt": packet.get("A_gps_alt", 0.0),
-            "current": packet.get("A_current", 0.0) if p == "A" else 0.0,
+
+            # Current — only A has this
+            "current": packet.get("A_current", 0.0),
+
+            # GPS satellite count (system-level, not per-controller)
+            "gps_sats": packet.get("gps_sats", 0),
         }
         return result
 

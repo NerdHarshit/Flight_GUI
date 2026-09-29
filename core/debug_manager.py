@@ -1,34 +1,102 @@
 """
-Debug Manager — System health evaluation and intelligent status messages.
-Evaluates telemetry freshness, controller flags, packet validity, etc.
+Debug Manager — System health evaluation and scrollable log.
+Maintains an interleaved log of raw packets and GUI-raised warnings/errors.
 """
 from time import time
+from collections import deque
 
 
-class DebugMessage:
-    def __init__(self, text, level="nominal"):
+class LogEntry:
+    """A single log entry — either a raw packet or a GUI-raised message."""
+
+    def __init__(self, text, source="gui", level="nominal"):
         self.text = text
-        self.level = level  # "nominal", "warning", "critical"
+        self.source = source     # "packet" | "gui" | "command"
+        self.level = level       # "nominal" | "warning" | "critical" | "info"
         self.timestamp = time()
 
     @property
     def color(self):
+        if self.source == "packet":
+            return "#888888"     # grey for raw packets
+        if self.source == "command":
+            return "#64B5F6"     # blue for command events
         return {
-            "nominal": "#00FF88",
-            "warning": "#FFD700",
+            "nominal":  "#00FF88",
+            "info":     "#64B5F6",
+            "warning":  "#FFD700",
             "critical": "#FF4444",
         }.get(self.level, "#AAAAAA")
 
+    @property
+    def prefix(self):
+        if self.source == "packet":
+            return "[PKT]"
+        if self.source == "command":
+            return "[CMD]"
+        return {
+            "nominal":  "[OK]",
+            "info":     "[INFO]",
+            "warning":  "[WARN]",
+            "critical": "[CRIT]",
+        }.get(self.level, "[---]")
+
 
 class DebugManager:
-    def __init__(self):
-        self.messages = []
-        self.max_messages = 50
+    def __init__(self, max_entries=500):
+        self.log = deque(maxlen=max_entries)
         self.last_packet_time = 0
         self.last_evaluation = 0
+        self._new_entries_count = 0  # track unread entries for UI polling
+
+    def log_packet(self, line):
+        """Log a raw incoming packet line."""
+        entry = LogEntry(line, source="packet", level="nominal")
+        self.log.append(entry)
+        self._new_entries_count += 1
+
+    def log_command(self, text):
+        """Log a command event (sent, acked, failed)."""
+        entry = LogEntry(text, source="command", level="info")
+        self.log.append(entry)
+        self._new_entries_count += 1
+
+    def log_warning(self, text):
+        """Log a GUI-raised warning."""
+        entry = LogEntry(text, source="gui", level="warning")
+        self.log.append(entry)
+        self._new_entries_count += 1
+
+    def log_error(self, text):
+        """Log a GUI-raised critical error."""
+        entry = LogEntry(text, source="gui", level="critical")
+        self.log.append(entry)
+        self._new_entries_count += 1
+
+    def log_info(self, text):
+        """Log a GUI info message."""
+        entry = LogEntry(text, source="gui", level="nominal")
+        self.log.append(entry)
+        self._new_entries_count += 1
+
+    def has_new_entries(self):
+        """Check if there are unread entries."""
+        return self._new_entries_count > 0
+
+    def get_new_entries(self):
+        """Get all new entries since last call and reset counter."""
+        count = self._new_entries_count
+        self._new_entries_count = 0
+        if count == 0:
+            return []
+        return list(self.log)[-count:]
+
+    def get_all_entries(self):
+        """Get the full log."""
+        return list(self.log)
 
     def evaluate(self, packet, telemetry_mgr, controller_mgr, connection_mgr):
-        """Run full system health evaluation. Returns current DebugMessage."""
+        """Run full system health evaluation. Logs any issues found."""
         now = time()
         self.last_evaluation = now
         issues = []
@@ -52,7 +120,7 @@ class DebugManager:
             if not flags.get("a_alive", True):
                 issues.append(("Controller A offline", "critical"))
             if not flags.get("b_alive", True):
-                issues.append(("Controller B offline", "warning"))
+                issues.append(("Controller B not present", "warning"))
 
             # 4. GPS lock
             if not flags.get("gps_lock", True):
@@ -94,25 +162,23 @@ class DebugManager:
             if not status.get("flash_ok", True):
                 issues.append(("Flash storage failed", "warning"))
 
-        # Build final message
+        # Log issues to the debug log
+        for text, level in issues:
+            if level == "critical":
+                self.log_error(text)
+            else:
+                self.log_warning(text)
+
+        # Return a summary for the top-level status label
         if not issues:
-            msg = DebugMessage("Everything nominal", "nominal")
+            return LogEntry("All systems nominal", source="gui", level="nominal")
         else:
-            # Show most critical issue
-            issues.sort(key=lambda x: {"critical": 0, "warning": 1, "nominal": 2}[x[1]])
+            issues.sort(key=lambda x: {"critical": 0, "warning": 1}[x[1]])
             text = " | ".join([i[0] for i in issues[:3]])
             level = issues[0][1]
-            msg = DebugMessage(text, level)
-
-        self._add_message(msg)
-        return msg
-
-    def _add_message(self, msg):
-        self.messages.append(msg)
-        if len(self.messages) > self.max_messages:
-            self.messages.pop(0)
+            return LogEntry(text, source="gui", level=level)
 
     def get_latest(self):
-        if self.messages:
-            return self.messages[-1]
-        return DebugMessage("Waiting for telemetry...", "warning")
+        if self.log:
+            return list(self.log)[-1]
+        return LogEntry("Waiting for telemetry...", source="gui", level="warning")
