@@ -1,0 +1,103 @@
+    controller A and B packet = {
+    char packetType;//added by the ground station pcb for easier distingguishing of cansat vs controller packets          
+    /*
+    // 'CAB' for controller A and B along with the status packets for them got 
+    by the buttn we have in gui 
+    */
+    uint32_t missionTime;       // ms since boot
+    uint8_t teamID;             //team id competiton requirement
+    float altitude;             // filtered baro altitude, m
+    float maxAltitude;          // peak recorded altitude, m
+
+    float accelX;                // m/s^2
+    float accelY;
+    float accelZ;
+    float accelMag;              // magnitude in G
+
+    float gyroX;                 // rad/s
+    float gyroY;
+    float gyroZ;
+
+    float temperature;           // deg C
+    float pressure;               // hPa
+
+    float pitch;                  // degrees
+    float roll;
+    float yaw;
+
+    float batteryVoltage;         // V
+
+    float gpsLat;
+    float gpsLon;
+    float gpsAltitude;
+    uint8_t gpsSats;
+    bool  gpsStale;                // true if fix is old or invalid
+
+    uint8_t A_state;                 // FlightState enum value
+
+    bool A_launched;
+    bool A_apogee;
+    bool A_separated;
+    bool A_landed;
+    bool controllerBAlive;         
+    float B_ax;                 // 4 bytes: Acceleration X (m/s^2)
+    float B_ay;                 // 4 bytes: Acceleration Y (m/s^2)
+    float B_az;                 // 4 bytes: Acceleration Z (m/s^2)
+    float B_baro_alt;           // 4 bytes: Barometric Altitude (m)
+    uint8_t B_state;            // 1 byte : FSM State ID
+    bool battLow;
+    uint16_t rssi;            // 2 bytes: RSSI (dBm)
+    uint16_t snr;             
+    uint16_t packet_loss;     // 2 bytes: Packet Loss (%)
+    } 
+ 
+ cansat packet = {
+   char packetType;
+   uint8_t teamID;             //team id competiton requirement
+  uint32_t timestamp;
+  uint8_t state;
+  float ax;
+  float ay;
+  float az;
+  float h_raw;
+  float h_filtered;
+  float gx;
+  float gy;
+  float gz;
+  float magX;
+  float magY;
+  float magZ;
+  float lat;
+  float lon;
+  float alt;
+  uint8_t satcnt;
+  float COG;
+  float headingErr;
+  float distToTarget;
+  float batteryVoltage;
+  uint16_t rssi;            // 2 bytes: RSSI (dBm)
+  uint16_t snr;             
+  uint16_t packet_loss;     // 2 bytes: Packet Loss (%)
+ }
+ 
+ NOte: CRC verification , addition of the radio related values (rssi ,snr, loss) ,
+ calculating and sending pitch yaw roll , adding packet type its all done by ground 
+ station pcb only then the packets are sent to the GUI via serial
+
+ values like temperature pressure etc for B are removed from the packet as both controllers
+ sit side by side so these values will be fairly same and hence can be simply copied from 
+ controller A for GUI_display 
+
+ for cansat use the h_raw as the one to be displayed for height.
+
+ also make sure that these all values are accordingly updated in the csv logging mechanism
+ to ensure correct column names
+ whatever we arent displaying in the GUI should also be logged, to be used in reports later
+ like the h_filtered and batteryVoltage , magx,y,z in cansat
+ and for controller A+B similar things - for ex - controllerBAlive, batteryVoltage,rssi,snr,packet_loss for controller B and 
+ for controller A - same things but for A. Also pitch yaw roll of both, for mag x y z too
+
+ some info on the ground station pcb that it uses frequency hopping to collect data from both
+ cansat anc controllerA+B where A+B one one frequency and cansat on other 
+
+

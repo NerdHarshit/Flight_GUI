@@ -282,47 +282,60 @@ class MainWindow(QMainWindow):
     # ──────────────────────────────────────────────────────────────────
 
     def _tick_ui(self):
-        packet = self.telemetry_mgr.last_packet
-        if not packet:
-            return
+        # Always update timer
+        self.lbl_timer.setText(f"T: {self.mission_state.get_elapsed_formatted()}")
 
-        # Deduplicate — skip if no new packet
         current_total = self.telemetry_mgr.total_packets
         if getattr(self, "_last_processed_total", None) == current_total:
-            # Still update timer even without new packet
-            self.lbl_timer.setText(
-                f"T: {self.mission_state.get_elapsed_formatted()}")
             return
         self._last_processed_total = current_total
 
-        active_telem = self.controller_mgr.get_active_telemetry(packet)
-        t = packet.get("time_ms", 0) / 1000.0
-
-        # Mission timer
-        self.lbl_timer.setText(f"T: {self.mission_state.get_elapsed_formatted()}")
-
-        # Push to whichever panel is currently displayed
         idx = self.stack.currentIndex()
-        if idx == 0:
-            self.panel_a.update_telemetry(active_telem, packet, t)
-        elif idx == 1:
-            self.panel_b.update_telemetry(active_telem, packet, t)
+        
+        if idx in (0, 1):
+            packet = self.telemetry_mgr.last_packet
+            if not packet:
+                return
+            active_telem = self.controller_mgr.get_active_telemetry(packet)
+            t = packet.get("time_ms", 0) / 1000.0
+            if idx == 0:
+                self.panel_a.update_telemetry(active_telem, packet, t)
+            elif idx == 1:
+                self.panel_b.update_telemetry(active_telem, packet, t)
         elif idx == 2:
-            self.panel_payload.update_telemetry(active_telem, packet, t)
+            packet = self.telemetry_mgr.last_cansat_packet
+            if not packet:
+                return
+            t = packet.get("time_ms", 0) / 1000.0
+            # For CanSat, active_telem is just the packet itself
+            self.panel_payload.update_telemetry(packet, packet, t)
 
-        # Always update inactive panels' timelines so they're ready when switched to
-        if idx != 0:
-            self.panel_a.timeline.set_state(active_telem.get("state", 0))
-        if idx != 1:
-            self.panel_b.timeline.set_state(active_telem.get("state", 0))
-        if idx != 2:
-            self.panel_payload.timeline.set_state(active_telem.get("state", 0))
+        # Update timelines for inactive panels so they're ready when switched to
+        if idx != 0 and self.telemetry_mgr.last_packet:
+            at = self.controller_mgr.get_active_telemetry(self.telemetry_mgr.last_packet)
+            self.panel_a.timeline.set_state(at.get("state", 0))
+        if idx != 1 and self.telemetry_mgr.last_packet:
+            at = self.controller_mgr.get_active_telemetry(self.telemetry_mgr.last_packet)
+            self.panel_b.timeline.set_state(at.get("state", 0))
+        if idx != 2 and self.telemetry_mgr.last_cansat_packet:
+            self.panel_payload.timeline.set_state(self.telemetry_mgr.last_cansat_packet.get("state", 0))
 
         # Map window update
-        lat = active_telem.get("lat", 0.0)
-        lon = active_telem.get("lon", 0.0)
-        if self.map_window and lat != 0.0:
-            self.map_window.update_location(lat, lon, active_telem.get("gps_alt", 0.0))
+        if self.map_window:
+            map_lat, map_lon, map_alt = 0.0, 0.0, 0.0
+            if idx in (0, 1) and self.telemetry_mgr.last_packet:
+                at = self.controller_mgr.get_active_telemetry(self.telemetry_mgr.last_packet)
+                map_lat = at.get("lat", 0.0)
+                map_lon = at.get("lon", 0.0)
+                map_alt = at.get("gps_alt", 0.0)
+            elif idx == 2 and self.telemetry_mgr.last_cansat_packet:
+                cp = self.telemetry_mgr.last_cansat_packet
+                map_lat = cp.get("lat", 0.0)
+                map_lon = cp.get("lon", 0.0)
+                map_alt = cp.get("alt", 0.0)
+
+            if map_lat != 0.0 or map_lon != 0.0:
+                self.map_window.update_location(map_lat, map_lon, map_alt)
 
     def _tick_debug(self):
         """1 Hz: run health check, update status label, feed debug console."""

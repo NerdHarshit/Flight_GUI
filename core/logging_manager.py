@@ -1,6 +1,5 @@
 """
-Logging Manager — Handles enhanced CSV exports, metadata headers, and mission folder organization.
-Replaces the old CSVExporter with better file handling.
+Logging Manager — Handles CSV exports, metadata headers, and mission folder organization for dual-controller avionics and CanSat telemetry.
 """
 import csv
 import os
@@ -17,52 +16,93 @@ class LoggingManager:
         return folder_name
 
     @staticmethod
-    def _write_csv(filename, buffer_a, buffer_b, mission_folder=None):
-        if not buffer_a.data and not buffer_b.data:
-            print("No flight data to export")
+    def _write_avionics_csv(filename, buffer_a, mission_folder=None):
+        if not buffer_a or not buffer_a.data:
             return None
 
         if mission_folder is None:
             os.makedirs("exports/csv", exist_ok=True)
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filepath = f"exports/csv/{filename}_{timestamp}.csv"
+            filepath = f"exports/csv/{filename}_avionics_{timestamp}.csv"
         else:
-            filepath = os.path.join(mission_folder, f"{filename}.csv")
+            filepath = os.path.join(mission_folder, f"{filename}_avionics.csv")
 
-        # Collect all fields from the new packet structure
         headers = [
-            "time_ms", 
-            "A_ax", "A_ay", "A_az", "A_gx", "A_gy", "A_gz",
-            "A_roll", "A_pitch", "A_yaw", "A_lat", "A_lon", "A_gps_alt",
-            "A_baro_alt", "A_pressure", "A_temperature", "A_voltage", "A_current",
-            "A_state", "A_apogee",
-            "B_ax", "B_ay", "B_az", "B_baro_alt", "B_pressure", "B_temperature",
-            "B_voltage", "B_state", "B_apogee",
-            "system_flags", "packet_id", "crc", "signal_strength", "packet_loss_pct",
-            
-            # Legacy compatibility fields
-            "timestamp", "Ax", "Ay", "Az", "H_baro", "Latitude", "Longitude",
-            "H_gps", "Gx", "Gy", "Gz", "FSM", "Signal", "Counter"
+            "time_ms", "team_id", "A_baro_alt", "max_alt",
+            "A_ax", "A_ay", "A_az", "accelMag",
+            "A_gx", "A_gy", "A_gz",
+            "A_temperature", "A_pressure",
+            "A_pitch", "A_roll", "A_yaw",
+            "A_voltage", "A_lat", "A_lon", "A_gps_alt",
+            "gps_sats", "gps_stale", "A_state",
+            "A_launched", "A_apogee", "A_separated", "A_landed",
+            "B_alive", "B_ax", "B_ay", "B_az", "B_baro_alt", "B_state",
+            "B_temperature", "B_pressure", "B_voltage", "B_pitch", "B_roll", "B_yaw",
+            "battLow", "rssi", "snr", "packet_loss"
         ]
+
+        # Dynamically append any unlisted non-private fields
+        for packet in buffer_a.data:
+            for k in packet.keys():
+                if not k.startswith("_") and k not in headers and k != "flags":
+                    headers.append(k)
 
         with open(filepath, "w", newline="") as file:
             writer = csv.DictWriter(file, fieldnames=headers, extrasaction='ignore')
             writer.writeheader()
-
-            # We write the merged data (or just data from A since it contains both in the new structure)
-            # A and B buffers contain the same packets, they just represent the history. 
-            # We can use buffer_a as the primary source of truth for the CSV.
             for packet in buffer_a.data:
                 writer.writerow(packet)
 
-        print(f"File: {filepath} exported")
+        print(f"Avionics flight data exported to: {filepath}")
+        return filepath
+
+    @staticmethod
+    def _write_cansat_csv(filename, buffer_cansat, mission_folder=None):
+        if not buffer_cansat or not buffer_cansat.data:
+            return None
+
+        if mission_folder is None:
+            os.makedirs("exports/csv", exist_ok=True)
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filepath = f"exports/csv/{filename}_cansat_{timestamp}.csv"
+        else:
+            filepath = os.path.join(mission_folder, f"{filename}_cansat.csv")
+
+        headers = [
+            "team_id", "time_ms", "state",
+            "ax", "ay", "az",
+            "h_raw", "h_filtered",
+            "gx", "gy", "gz",
+            "magX", "magY", "magZ",
+            "lat", "lon", "alt", "gps_sats",
+            "COG", "headingErr", "distToTarget",
+            "batteryVoltage", "rssi", "snr", "packet_loss"
+        ]
+
+        # Dynamically append any unlisted non-private fields
+        for packet in buffer_cansat.data:
+            for k in packet.keys():
+                if not k.startswith("_") and k not in headers:
+                    headers.append(k)
+
+        with open(filepath, "w", newline="") as file:
+            writer = csv.DictWriter(file, fieldnames=headers, extrasaction='ignore')
+            writer.writeheader()
+            for packet in buffer_cansat.data:
+                writer.writerow(packet)
+
+        print(f"CanSat telemetry data exported to: {filepath}")
         return filepath
 
     @staticmethod
     def exportCheckPoint(telemetry_mgr):
-        return LoggingManager._write_csv("checkpoint", telemetry_mgr.buffer_a, telemetry_mgr.buffer_b)
+        av_path = LoggingManager._write_avionics_csv("checkpoint", getattr(telemetry_mgr, 'buffer_a', None))
+        can_path = LoggingManager._write_cansat_csv("checkpoint", getattr(telemetry_mgr, 'buffer_cansat', None))
+        return av_path or can_path
 
     @staticmethod
     def exportFullCSV(telemetry_mgr):
         mission_folder = LoggingManager._create_mission_folder()
-        return LoggingManager._write_csv("full_flight", telemetry_mgr.buffer_a, telemetry_mgr.buffer_b, mission_folder)
+        av_path = LoggingManager._write_avionics_csv("full_flight", getattr(telemetry_mgr, 'buffer_a', None), mission_folder)
+        can_path = LoggingManager._write_cansat_csv("full_flight", getattr(telemetry_mgr, 'buffer_cansat', None), mission_folder)
+        return av_path or can_path

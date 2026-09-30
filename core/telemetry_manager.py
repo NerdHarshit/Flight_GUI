@@ -131,6 +131,14 @@ def parse_csv_packet(line: str) -> Optional[dict]:
 
         parts = line.split(",")
 
+        # CAB Format (Avionics A+B)
+        if parts[0] in ("CAB", "A"):
+            return _parse_cab_csv(parts)
+            
+        # CAN Format (CanSat)
+        elif parts[0] in ("CANSAT", "CAN", "C"):
+            return _parse_cansat_csv(parts)
+
         # Legacy formats
         if len(parts) == 14:
             return _parse_legacy_csv(parts)
@@ -139,6 +147,99 @@ def parse_csv_packet(line: str) -> Optional[dict]:
 
         return None
 
+    except Exception:
+        return None
+
+def _parse_cab_csv(parts: list) -> Optional[dict]:
+    if len(parts) < 38: return None
+    try:
+        return {
+            "type": "CAB",
+            "time_ms": int(parts[1]),
+            "team_id": int(parts[2]),
+            "A_baro_alt": float(parts[3]),
+            "max_alt": float(parts[4]),
+            "A_ax": float(parts[5]),
+            "A_ay": float(parts[6]),
+            "A_az": float(parts[7]),
+            "accelMag": float(parts[8]),
+            "A_gx": float(parts[9]),
+            "A_gy": float(parts[10]),
+            "A_gz": float(parts[11]),
+            "A_temperature": float(parts[12]),
+            "A_pressure": float(parts[13]),
+            "A_pitch": float(parts[14]),
+            "A_roll": float(parts[15]),
+            "A_yaw": float(parts[16]),
+            "A_voltage": float(parts[17]),
+            "A_lat": float(parts[18]),
+            "A_lon": float(parts[19]),
+            "A_gps_alt": float(parts[20]),
+            "gps_sats": int(parts[21]),
+            "gps_stale": bool(int(parts[22])),
+            "A_state": int(parts[23]),
+            "A_launched": bool(int(parts[24])),
+            "A_apogee": bool(int(parts[25])),
+            "A_separated": bool(int(parts[26])),
+            "A_landed": bool(int(parts[27])),
+            "B_alive": bool(int(parts[28])),
+            "B_ax": float(parts[29]),
+            "B_ay": float(parts[30]),
+            "B_az": float(parts[31]),
+            "B_baro_alt": float(parts[32]),
+            "B_state": int(parts[33]),
+            "battLow": bool(int(parts[34])),
+            "rssi": int(parts[35]),
+            "snr": int(parts[36]),
+            "packet_loss": int(parts[37]),
+            # For controller B fallback as user noted
+            "B_temperature": float(parts[12]),
+            "B_pressure": float(parts[13]),
+            "B_voltage": float(parts[17]),
+            "B_pitch": float(parts[14]),
+            "B_roll": float(parts[15]),
+            "B_yaw": float(parts[16]),
+            "flags": {
+                "a_alive": True,
+                "b_alive": bool(int(parts[28]))
+            },
+            "_receive_time": time(),
+        }
+    except Exception:
+        return None
+
+def _parse_cansat_csv(parts: list) -> Optional[dict]:
+    if len(parts) < 26: return None
+    try:
+        return {
+            "type": "CAN",
+            "team_id": int(parts[1]),
+            "time_ms": int(parts[2]),
+            "state": int(parts[3]),
+            "ax": float(parts[4]),
+            "ay": float(parts[5]),
+            "az": float(parts[6]),
+            "h_raw": float(parts[7]),
+            "h_filtered": float(parts[8]),
+            "gx": float(parts[9]),
+            "gy": float(parts[10]),
+            "gz": float(parts[11]),
+            "magX": float(parts[12]),
+            "magY": float(parts[13]),
+            "magZ": float(parts[14]),
+            "lat": float(parts[15]),
+            "lon": float(parts[16]),
+            "alt": float(parts[17]),
+            "gps_sats": int(parts[18]),
+            "COG": float(parts[19]),
+            "headingErr": float(parts[20]),
+            "distToTarget": float(parts[21]),
+            "batteryVoltage": float(parts[22]),
+            "rssi": int(parts[23]),
+            "snr": int(parts[24]),
+            "packet_loss": int(parts[25]),
+            "_receive_time": time(),
+        }
     except Exception:
         return None
 
@@ -450,9 +551,11 @@ class TelemetryManager:
     def __init__(self):
         self.buffer_a = ControllerBuffer("A")
         self.buffer_b = ControllerBuffer("B")
+        self.buffer_cansat = ControllerBuffer("CANSAT")
         self.active_controller = "A"  # "A" or "B"
 
         self.last_packet: Optional[dict] = None
+        self.last_cansat_packet: Optional[dict] = None
         self.last_receive_time: float = 0
         self.total_packets: int = 0
         self.start_time: float = time()
@@ -474,7 +577,6 @@ class TelemetryManager:
 
     def process_packet(self, packet: dict):
         """Process a parsed telemetry packet into both controller buffers."""
-        self.last_packet = packet
         self.last_receive_time = time()
         self.total_packets += 1
 
@@ -483,19 +585,29 @@ class TelemetryManager:
         if len(self._rate_window) > self._rate_window_size:
             self._rate_window.pop(0)
 
-        # Store in both buffers (same packet contains both A and B data)
-        self.buffer_a.add_packet(packet)
-        self.buffer_b.add_packet(packet)
-
-        # Update max values for A
+        p_type = packet.get("type", "UNKNOWN")
         import math
-        a_acc = math.sqrt(packet.get("A_ax", 0)**2 + packet.get("A_ay", 0)**2 + packet.get("A_az", 0)**2)
-        self.buffer_a.max_acceleration = max(self.buffer_a.max_acceleration, a_acc)
-        self.buffer_a.max_altitude = max(self.buffer_a.max_altitude, packet.get("A_baro_alt", 0))
 
-        b_acc = math.sqrt(packet.get("B_ax", 0)**2 + packet.get("B_ay", 0)**2 + packet.get("B_az", 0)**2)
-        self.buffer_b.max_acceleration = max(self.buffer_b.max_acceleration, b_acc)
-        self.buffer_b.max_altitude = max(self.buffer_b.max_altitude, packet.get("B_baro_alt", 0))
+        if p_type == "CAB":
+            self.last_packet = packet
+            self.buffer_a.add_packet(packet)
+            self.buffer_b.add_packet(packet)
+
+            a_acc = math.sqrt(packet.get("A_ax", 0)**2 + packet.get("A_ay", 0)**2 + packet.get("A_az", 0)**2)
+            self.buffer_a.max_acceleration = max(self.buffer_a.max_acceleration, a_acc)
+            self.buffer_a.max_altitude = max(self.buffer_a.max_altitude, packet.get("A_baro_alt", 0))
+
+            b_acc = math.sqrt(packet.get("B_ax", 0)**2 + packet.get("B_ay", 0)**2 + packet.get("B_az", 0)**2)
+            self.buffer_b.max_acceleration = max(self.buffer_b.max_acceleration, b_acc)
+            self.buffer_b.max_altitude = max(self.buffer_b.max_altitude, packet.get("B_baro_alt", 0))
+
+        elif p_type == "CAN":
+            self.last_cansat_packet = packet
+            self.buffer_cansat.add_packet(packet)
+
+            c_acc = math.sqrt(packet.get("ax", 0)**2 + packet.get("ay", 0)**2 + packet.get("az", 0)**2)
+            self.buffer_cansat.max_acceleration = max(self.buffer_cansat.max_acceleration, c_acc)
+            self.buffer_cansat.max_altitude = max(self.buffer_cansat.max_altitude, packet.get("alt", 0))
 
     def process_status(self, status: dict):
         """Store the latest STATUS packet from Ground Pico."""
@@ -538,7 +650,9 @@ class TelemetryManager:
     def reset(self):
         self.buffer_a.reset()
         self.buffer_b.reset()
+        self.buffer_cansat.reset()
         self.last_packet = None
+        self.last_cansat_packet = None
         self.total_packets = 0
         self.start_time = time()
         self._rate_window.clear()

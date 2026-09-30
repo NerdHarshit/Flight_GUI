@@ -29,7 +29,7 @@ from core.command_manager import (
 
 
 
-def _info_block(title, fields):
+def _info_block(title, fields, columns=1):
     """Build a compact labeled-field block QFrame."""
     frame = QFrame()
     frame.setObjectName("Card")
@@ -38,14 +38,23 @@ def _info_block(title, fields):
     lay.setSpacing(2)
     t = QLabel(title); t.setObjectName("CardTitle")
     lay.addWidget(t)
+    
+    grid = QGridLayout()
+    grid.setSpacing(4)
+    lay.addLayout(grid)
+    
     labels = {}
-    for name in fields:
-        row = QHBoxLayout(); row.setSpacing(4)
-        fl = QLabel(f"{name}:"); fl.setObjectName("FieldLabel"); fl.setFixedWidth(72)
+    for i, name in enumerate(fields):
+        row = i // columns
+        col = (i % columns) * 2
+        
+        fl = QLabel(f"{name}:"); fl.setObjectName("FieldLabel")
         vl = QLabel("--"); vl.setObjectName("ValueLabel")
-        row.addWidget(fl); row.addWidget(vl)
-        lay.addLayout(row)
+        
+        grid.addWidget(fl, row, col)
+        grid.addWidget(vl, row, col + 1)
         labels[name] = vl
+        
     return frame, labels
 
 
@@ -189,7 +198,7 @@ class PayloadPanel(QWidget):
 
         # GPS / position block below map
         gps_frame, self._gps_lbl = _info_block(
-            "Position", ["H", "Lat", "Lon", "Alt", "SatCnt", "Heading"])
+            "Position", ["H", "COG", "Lat", "headingErr", "Lon", "distToTarget", "Alt", "", "SatCnt", "", "Heading", ""], columns=2)
         lay.addWidget(gps_frame)
 
         return lay
@@ -568,10 +577,15 @@ class PayloadPanel(QWidget):
 
         # GPS info block
         g = self._gps_lbl
-        g["H"].setText(f"{active_telem.get('baro_alt', 0.0):.1f} m")
+        g["H"].setText(f"{packet.get('h_raw', active_telem.get('baro_alt', 0.0)):.1f} m")
+        g["COG"].setText(f"{packet.get('COG', 0.0):.1f}°")
         g["Lat"].setText(f"{lat:.6f}")
+        g["headingErr"].setText(f"{packet.get('headingErr', 0.0):.1f}°")
         g["Lon"].setText(f"{lon:.6f}")
+        g["distToTarget"].setText(f"{packet.get('distToTarget', 0.0):.1f} m")
         g["Alt"].setText(f"{active_telem.get('gps_alt', 0.0):.1f} m")
+        if "" in g:
+            g[""].setText("")
         g["SatCnt"].setText(str(active_telem.get("gps_sats", "--")))
         g["Heading"].setText(f"{packet.get('heading', 0.0):.1f}°")
 
@@ -580,9 +594,12 @@ class PayloadPanel(QWidget):
         connected = packet.get("radio_connected", True)
         r["Radio_connected"].setText("YES" if connected else "NO")
         r["Radio_connected"].setStyleSheet("color:#00FF88;" if connected else "color:#FF4444;")
-        r["Rssi"].setText(f"{packet.get('signal_strength', '--')} dB")
-        r["SNR"].setText(f"{packet.get('snr', '--'):.1f} dB")
-        r["Packet_loss"].setText(f"{packet.get('packet_loss_pct', 0.0):.1f}%")
+        rssi_val = packet.get('rssi', packet.get('signal_strength', '--'))
+        r["Rssi"].setText(f"{rssi_val} dBm")
+        snr_val = packet.get('snr', '--')
+        r["SNR"].setText(f"{snr_val:.1f} dB" if isinstance(snr_val, (int, float)) else f"{snr_val} dB")
+        loss_val = packet.get('packet_loss', packet.get('packet_loss_pct', 0.0))
+        r["Packet_loss"].setText(f"{loss_val}%")
 
         # Grey-out reset outside LAUNCH_PAD
         in_launchpad = (active_telem.get("state", 0) == 2)
