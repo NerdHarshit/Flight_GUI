@@ -1,82 +1,83 @@
 /**
  * ============================================================
- *  AvioPro Ground Station Firmware
+ *  AvioPro Ground Station Firmware (Full Command Tester) v2.3
  *  Hardware : Raspberry Pi Pico + RFM95 (SX1276) LoRa module
- *  Library  : Sandeep Mistry "LoRa" library
- *  Protocol : AvioPro Ground Station & PCB Interface Contract
- *             (see protocol_spec.md)
- * ============================================================
- *
- *  Serial output (USB, 115200 baud) → AvioPro Flight GUI
- *    • CAB,…    – 38-field avionics CSV  (Controller A+B)
- *    • CANSAT,… – 26-field CanSat CSV
- *    • STATUS,… – periodic heartbeat
- *    • ACK id=<CMD_ID> – command acknowledgement
- *
- *  Command uplink (binary frame from GUI over Serial):
- *    [0xAA][0x55][CMD_TYPE][CMD_ID_LSB][CMD_ID_MSB][PAYLOAD…]
- *
- *  Frequency hopping:
- *    • AVIONICS_FREQ (MHz) → Controller A + B
- *    • CANSAT_FREQ   (MHz) → CanSat payload
  * ============================================================
  */
 
 #include <SPI.h>
 #include <LoRa.h>
 #include <math.h>
+#include <stddef.h>
 
 // ─── Pin Mapping (RP2040 / Pico) ────────────────────────────
-// Adjust to match your PCB schematic.
 #define LORA_NSS   17   // SPI chip-select (GP17)
 #define LORA_RST   20   // Reset          (GP20)
 #define LORA_DIO0  22   // IRQ / DIO0     (GP22)
-// SPI: default SPI0 → SCK=18, MISO=16, MOSI=19 (Pico default)
 
 // ─── Mission Configuration ───────────────────────────────────
-#define TEAM_ID             42      // Change to your competition team ID
+#define TEAM_ID             18
 
-#define AVIONICS_FREQ       868E6   // Hz – Controller A+B frequency
-#define CANSAT_FREQ         869E6   // Hz – CanSat frequency
+#define AVIONICS_FREQ       866E6   // 866 MHz (Controller A)
+#define CANSAT_FREQ         867.75E6   // 868 MHz (CanSat)
 
-#define LORA_SF             9       // Spreading Factor (7–12)
-#define LORA_BW             125E3   // Bandwidth in Hz
-#define LORA_TX_POWER       20      // dBm (2–20)
+#define AVIONICS_SF         8       // Spreading Factor for Controller A
+#define CANSAT_SF           8       // Spreading Factor for CanSat
+
+#define AVIONICS_SYNC_WORD  0x92    // Sync Word for Controller A
+#define CANSAT_SYNC_WORD    0x92    // Sync Word for CanSat
+
+#define LORA_BW             125E3   // 125 kHz Bandwidth
+#define LORA_TX_POWER       20      // dBm
 #define LORA_CODING_RATE    5       // 4/5
 
-// Frequency-hop dwell time (ms per channel before switching)
-#define HOP_DWELL_MS        150
+// 1200ms Dwell to ensure 257ms packets can complete without being cut off
+#define HOP_DWELL_MS        1200    
+#define STATUS_INTERVAL_MS  2000    
 
-// STATUS heartbeat interval (ms)
-#define STATUS_INTERVAL_MS  2000
+// Uplink reliability: A is deaf ~257 ms of every 500 ms while it transmits
+// telemetry, and a command frame is ~72 ms on air. One shot only lands ~1/3 of
+// the time, so each command is sent several times with the SAME seq number
+// (A drops duplicates by seq, so repeats are harmless).
+#define CMD_REPEATS_AVIONICS  5
+#define CMD_REPEATS_CANSAT    3
+#define CMD_REPEAT_GAP_MS     80    // + ~72 ms airtime => ~150 ms between starts
 
-// ─── Command sync bytes ──────────────────────────────────────
-#define CMD_SYNC1  0xAA
-#define CMD_SYNC2  0x55
+// ─── Protocol Sync Bytes & Packet Identifiers ────────────────
+#define LORA_PKT_SYNC_0     0xA5
+#define LORA_PKT_SYNC_1     0x5A
+#define PKT_STATUS          0xA1
+#define PKT_TELEMETRY       0xA2
 
-// Maximum command payload bytes (CMD_SET_TARGET_GPS = 8 bytes)
-#define CMD_MAX_PAYLOAD  32
+#define CMD_SYNC1           0xAA
+#define CMD_SYNC2           0x55
+#define CMD_MAX_PAYLOAD     32
 
-// ─── Command type codes (mirror command_manager.py) ──────────
-#define CMD_START_TELEMETRY   0x01
-#define CMD_STOP_TELEMETRY    0x02
-#define CMD_SENSOR_ZERO       0x03
-#define CMD_RESET_TIMER       0x04
-#define CMD_REQUEST_STATUS    0x05
-#define CMD_BUZZER_PLAY       0x09
-#define CMD_RESET_CONTROLLER  0x0C
-#define CMD_SET_QNH           0x0D
-#define CMD_ENABLE_SERVOS     0x10
-#define CMD_DISABLE_SERVOS    0x11
-#define CMD_SERVO_L_POS       0x12
-#define CMD_SERVO_L_NEG       0x13
-#define CMD_SERVO_R_POS       0x14
-#define CMD_SERVO_R_NEG       0x15
-#define CMD_SET_TARGET_GPS    0x16
-#define CMD_SET_PD_CONSTANTS  0x17
-#define CMD_SPIRAL_DOWN       0x18
+// ─── Telemetry Wire Flags ────────────────────────────────────
+#define TLM_FLAG_LAUNCHED     (1u << 0)
+#define TLM_FLAG_APOGEE       (1u << 1)
+#define TLM_FLAG_SEPARATED    (1u << 2)
+#define TLM_FLAG_LANDED       (1u << 3)
+#define TLM_FLAG_CTRLB_ALIVE  (1u << 4)
+#define TLM_FLAG_BATT_LOW     (1u << 5)
+#define TLM_FLAG_GPS_STALE    (1u << 6)
 
-// ─── Enums (declared early so Arduino auto-prototypes can resolve them) ──
+// ─── Command Codes Matched to Flight Hardware ────────────────
+#define CMD_START_TX          0x02
+#define CMD_STOP_TX           0x03
+#define CMD_SET_ZERO          0x04
+#define CMD_BEEP              0x05
+#define CMD_ERASE_FLASH       0x09
+#define CMD_GET_STATUS        0x0A
+#define CMD_SET_SEALEVEL_HPA  0x0B
+#define CMD_SERVO_PARACHUTE   0x0C
+#define CMD_SERVO_PAYLOAD     0x0D
+#define CMD_RESET_MCU         0x10
+#define CMD_SET_TARGET        0x11
+#define CMD_GYRO_ON           0x12
+#define CMD_GYRO_OFF          0x13
+#define CMD_BURN_WIRE         0x14
+
 enum Channel { CH_AVIONICS, CH_CANSAT };
 
 enum CmdParseState {
@@ -88,139 +89,76 @@ enum CmdParseState {
     WAIT_PAYLOAD
 };
 
-// ─── Forward declarations ────────────────────────────────────
-void handleCommand(uint8_t type, uint16_t id, uint8_t* payload, uint8_t payLen);
-void switchChannel(Channel ch);
-
-// ─── CanSat-targeted commands (relayed on CANSAT_FREQ) ───────
-static bool isCanSatCommand(uint8_t cmd) {
-    switch (cmd) {
-        case CMD_ENABLE_SERVOS:
-        case CMD_DISABLE_SERVOS:
-        case CMD_SERVO_L_POS:
-        case CMD_SERVO_L_NEG:
-        case CMD_SERVO_R_POS:
-        case CMD_SERVO_R_NEG:
-        case CMD_SET_TARGET_GPS:
-        case CMD_SET_PD_CONSTANTS:
-        case CMD_SPIRAL_DOWN:
-            return true;
-        default:
-            return false;
-    }
-}
-
-// ─── Avionics (CAB) raw packet layout ────────────────────────
-// Transmitted by Controller A over LoRa; Controller B data is
-// embedded within the same packet.
-struct __attribute__((packed)) AvionicsPacket {
-    uint8_t  packetType;        // 'A'
-    uint32_t missionTime;       // ms since boot
-    uint8_t  teamID;
-    float    altitude;          // filtered baro alt, m
-    float    maxAltitude;       // peak altitude, m
-
-    float    accelX;            // m/s²
+// ─── Avionics On-Air Packet Layout (78 bytes) ────────────────
+struct __attribute__((packed)) TelemetryWireAvionics {
+    uint32_t missionTime;
+    float    altitude;
+    float    maxAltitude;
+    float    accelX;
     float    accelY;
     float    accelZ;
-    float    accelMag;          // magnitude (G or m/s²)
-
-    float    gyroX;             // rad/s
-    float    gyroY;
-    float    gyroZ;
-
-    float    temperature;       // °C
-    float    pressure;          // hPa
-
-    // Pitch/Roll/Yaw — computed by GS if zero
+    float    accelMag;
+    float    temperature;
+    float    pressure;
     float    pitch;
     float    roll;
     float    yaw;
-
-    float    batteryVoltage;    // V
-
+    float    batteryVoltage;
     float    gpsLat;
     float    gpsLon;
     float    gpsAltitude;
     uint8_t  gpsSats;
-    uint8_t  gpsStale;          // 1 = stale/invalid
-
-    uint8_t  A_state;
-    uint8_t  A_launched;
-    uint8_t  A_apogee;
-    uint8_t  A_separated;
-    uint8_t  A_landed;
-
-    uint8_t  controllerBAlive;
-    float    B_ax;
-    float    B_ay;
-    float    B_az;
-    float    B_baro_alt;
-    uint8_t  B_state;
-    uint8_t  battLow;
-
-    uint16_t crc;               // CRC-16 over all preceding bytes
-};
-
-// ─── CanSat raw packet layout ────────────────────────────────
-struct __attribute__((packed)) CanSatPacket {
-    uint8_t  packetType;        // 'C'
-    uint8_t  teamID;
-    uint32_t timestamp;         // ms since boot
     uint8_t  state;
-
-    float    ax;                // m/s²
-    float    ay;
-    float    az;
-
-    float    h_raw;             // raw baro alt, m  (displayed in GUI)
-    float    h_filtered;        // filtered alt, m  (logged to CSV only)
-
-    float    gx;                // rad/s or deg/s
-    float    gy;
-    float    gz;
-
-    float    magX;              // µT (logged to CSV)
-    float    magY;
-    float    magZ;
-
-    float    lat;
-    float    lon;
-    float    alt;               // GPS altitude, m
-    uint8_t  satcnt;
-
-    float    COG;               // Course Over Ground, deg
-    float    headingErr;        // deg
-    float    distToTarget;      // m
-
-    float    batteryVoltage;    // V (logged to CSV)
-
-    uint16_t crc;               // CRC-16 over all preceding bytes
+    uint8_t  flags;
+    uint8_t  bState;
+    float    bAltitude;
+    float    bAccelMag;
+    uint16_t crc;
 };
 
-// ─── Ground-station state ─────────────────────────────────────
+// ─── CanSat On-Air Packet Layout (99 bytes) ──────────────────
+struct __attribute__((packed)) TelemetryWireCanSat {
+    uint32_t missionTime;
+    float    altitude;
+    float    maxAltitude;
+    float    accelX;
+    float    accelY;
+    float    accelZ;
+    float    accelMag;
+    float    temperature;
+    float    pressure;
+    float    pitch;
+    float    roll;
+    float    yaw;
+    float    batteryVoltage;
+    float    gpsLat;
+    float    gpsLon;
+    float    gpsAltitude;
+    uint8_t  gpsSats;
+    uint8_t  state;
+    uint8_t  flags;
+    uint8_t  bState;
+    float    bAltitude;
+    float    bAccelMag;
+    float    gpsCourse;
+    float    gpsSpeed;
+    float    headingError;
+    float    guidanceU;
+    float    targetDistance;
+    uint8_t  guideFlags;
+    uint16_t crc;
+};
+
+// ─── State Variables ─────────────────────────────────────────
 Channel    currentChannel    = CH_AVIONICS;
 uint32_t   lastHopTime       = 0;
 uint32_t   lastStatusTime    = 0;
 bool       telemetryEnabled  = true;
+uint8_t    gsCmdSeq          = 0;
 
-// Packet-loss tracking per channel
-uint32_t   avioRxCount       = 0;
-uint32_t   avioExpected      = 0;
-uint16_t   avioLastId        = 0;
-bool       avioFirstPkt      = true;
-
-uint32_t   canRxCount        = 0;
-uint32_t   canExpected       = 0;
-uint16_t   canLastId         = 0;
-bool       canFirstPkt       = true;
-
-// Latest radio metrics (updated on each received packet)
 int16_t    lastRSSI          = 0;
 float      lastSNR           = 0.0f;
-uint16_t   lastPacketLoss    = 0;
 
-// Serial command parser state
 CmdParseState cmdState       = WAIT_SYNC1;
 uint8_t       cmdType        = 0;
 uint16_t      cmdId          = 0;
@@ -228,7 +166,11 @@ uint8_t       cmdPayload[CMD_MAX_PAYLOAD];
 uint8_t       cmdPayloadLen  = 0;
 uint8_t       cmdPayloadIdx  = 0;
 
-// ─── CRC-16/CCITT ────────────────────────────────────────────
+// ─── Forward Declarations ────────────────────────────────────
+void switchChannel(Channel ch);
+void handleCommand(uint8_t type, uint16_t id, uint8_t* payload, uint8_t payLen);
+
+// ─── CRC-16/CCITT-FALSE ──────────────────────────────────────
 uint16_t crc16(const uint8_t* data, size_t length) {
     uint16_t crc = 0xFFFF;
     for (size_t i = 0; i < length; i++) {
@@ -241,136 +183,133 @@ uint16_t crc16(const uint8_t* data, size_t length) {
     return crc;
 }
 
-// ─── Attitude computation ─────────────────────────────────────
-// Computes pitch and roll from normalised accelerometer.
-// Yaw requires magnetometer — left as 0 at GS level (no mag on GS).
-void computeAttitude(float ax, float ay, float az,
-                     float &pitch, float &roll, float &yaw) {
-    float norm = sqrtf(ax*ax + ay*ay + az*az);
-    if (norm < 0.001f) { pitch = roll = yaw = 0.0f; return; }
-    ax /= norm; ay /= norm; az /= norm;
-    pitch = -(asinf(ax)       * 180.0f / (float)M_PI);
-    roll  =  (atan2f(ay, az)  * 180.0f / (float)M_PI);
-    yaw   = 0.0f;  // magnetometer not available at GS
-}
-
-// ─── Channel switching ────────────────────────────────────────
+// ─── Dynamic Channel Switching ───────────────────────────────
 void switchChannel(Channel ch) {
     LoRa.idle();
-    LoRa.setFrequency(ch == CH_AVIONICS ? AVIONICS_FREQ : CANSAT_FREQ);
+    if (ch == CH_AVIONICS) {
+        LoRa.setFrequency(AVIONICS_FREQ);
+        LoRa.setSpreadingFactor(AVIONICS_SF);
+        LoRa.setSyncWord(AVIONICS_SYNC_WORD);
+    } else {
+        LoRa.setFrequency(CANSAT_FREQ);
+        LoRa.setSpreadingFactor(CANSAT_SF);
+        LoRa.setSyncWord(CANSAT_SYNC_WORD);
+    }
     currentChannel = ch;
     LoRa.receive();
 }
 
-// ─── Packet-loss calculator ───────────────────────────────────
-uint16_t calcPacketLoss(uint16_t currentId,
-                        uint16_t &lastId,
-                        uint32_t &rxCount,
-                        uint32_t &expected,
-                        bool &isFirst) {
-    if (isFirst) {
-        lastId   = currentId;
-        rxCount  = 1;
-        expected = 1;
-        isFirst  = false;
-        return 0;
+// ─── Avionics Status Packet (PKT_STATUS) ─────────────────────
+// Must match Controller A's StatusPacket exactly (NOT packed on A, so the
+// natural ARM layout with padding is what goes on air: 16 bytes).
+// Frame: [0xA5][0x5A][0xA1][ StatusPacket ]  (no seq byte, 19 bytes total)
+struct AvionicsStatus {
+    uint8_t  marker;
+    bool     bmpOK;
+    bool     bnoOK;
+    bool     sdOK;
+    bool     flashOK;
+    bool     loraOK;
+    bool     gpsSearching;
+    bool     ctrlBAlive;
+    float    battV;
+    uint8_t  flightNumber;
+    uint16_t crc;
+};
+
+void handleAvionicsStatus(uint8_t* buf, int size) {
+    if (size < 3 + (int)sizeof(AvionicsStatus)) return;
+
+    AvionicsStatus st;
+    memcpy(&st, buf + 3, sizeof(st));   // memcpy: buf+3 is not 4-byte aligned
+
+    uint16_t calcCRC = crc16((const uint8_t*)&st, offsetof(AvionicsStatus, crc));
+    if (calcCRC != st.crc || st.marker != 0x55) {
+        Serial.println("GS_WARN: Avionics STATUS CRC mismatch — packet dropped");
+        return;
     }
-    rxCount++;
-    uint16_t delta = (uint16_t)(currentId - lastId);
-    if (delta == 0 || delta > 1000) delta = 1;  // wrap / jump guard
-    expected += delta;
-    lastId = currentId;
-    if (expected == 0) return 0;
-    uint32_t lost = (expected > rxCount) ? (expected - rxCount) : 0;
-    return (uint16_t)((lost * 100UL) / expected);
+
+    lastRSSI = (int16_t)LoRa.packetRssi();
+    lastSNR  = LoRa.packetSnr();
+
+    // Same field order as the GS heartbeat line the GUI already parses, but
+    // with Controller A's REAL values instead of hardcoded ones.
+    char line[128];
+    snprintf(line, sizeof(line),
+        "STATUS,A,%u,%u,%u,%u,%u,%u,%u,%.2f,%u,%d,%.1f",
+        (unsigned)st.bmpOK, (unsigned)st.bnoOK, (unsigned)st.sdOK,
+        (unsigned)st.flashOK, (unsigned)st.loraOK,
+        (unsigned)st.gpsSearching, (unsigned)st.ctrlBAlive,
+        st.battV, (unsigned)st.flightNumber,
+        (int)lastRSSI, lastSNR);
+    Serial.println(line);
 }
 
-// ─── Avionics packet handler ──────────────────────────────────
+// ─── Avionics Packet Handler ──────────────────────────────────
 void handleAvionicsPacket(uint8_t* buf, int size) {
-    if ((size_t)size < sizeof(AvionicsPacket)) return;
+    if (size < 3) return;
+    if (buf[0] != LORA_PKT_SYNC_0 || buf[1] != LORA_PKT_SYNC_1) return;
 
-    AvionicsPacket* pkt = (AvionicsPacket*)buf;
+    // FIX: status frames were silently discarded (only telemetry was handled).
+    if (buf[2] == PKT_STATUS) { handleAvionicsStatus(buf, size); return; }
 
-    // CRC verification — covers all bytes before the crc field
-    size_t   crcLen  = sizeof(AvionicsPacket) - sizeof(uint16_t);
-    uint16_t calcCRC = crc16(buf, crcLen);
+    if (buf[2] != PKT_TELEMETRY) return;
+    if (size < 4 + (int)sizeof(TelemetryWireAvionics)) return;
+
+    TelemetryWireAvionics* pkt = (TelemetryWireAvionics*)(buf + 4);
+
+    size_t crcLen = offsetof(TelemetryWireAvionics, crc);
+    uint16_t calcCRC = crc16(buf + 4, crcLen);
     if (calcCRC != pkt->crc) {
         Serial.println("GS_WARN: Avionics CRC mismatch — packet dropped");
         return;
     }
 
-    // Radio metrics from Sandeep Mistry LoRa library
     lastRSSI = (int16_t)LoRa.packetRssi();
     lastSNR  = LoRa.packetSnr();
 
-    // Packet-loss — use lower 16 bits of missionTime as rolling ID
-    uint16_t pseudoId  = (uint16_t)(pkt->missionTime & 0xFFFF);
-    lastPacketLoss = calcPacketLoss(pseudoId,
-                                    avioLastId, avioRxCount,
-                                    avioExpected, avioFirstPkt);
-
-    // Attitude — compute from accel if the flight SW didn't send it
-    float pitch = pkt->pitch;
-    float roll  = pkt->roll;
-    float yaw   = pkt->yaw;
-    if (pitch == 0.0f && roll == 0.0f && yaw == 0.0f) {
-        computeAttitude(pkt->accelX, pkt->accelY, pkt->accelZ,
-                        pitch, roll, yaw);
-    }
-
     if (!telemetryEnabled) return;
 
-    // ── CAB CSV — 38 fields (protocol_spec §2.1) ───────────────
+    bool launched  = (pkt->flags & TLM_FLAG_LAUNCHED) != 0;
+    bool apogee    = (pkt->flags & TLM_FLAG_APOGEE) != 0;
+    bool separated = (pkt->flags & TLM_FLAG_SEPARATED) != 0;
+    bool landed    = (pkt->flags & TLM_FLAG_LANDED) != 0;
+    bool ctrlB     = (pkt->flags & TLM_FLAG_CTRLB_ALIVE) != 0;
+    bool battLow   = (pkt->flags & TLM_FLAG_BATT_LOW) != 0;
+    bool gpsStale  = (pkt->flags & TLM_FLAG_GPS_STALE) != 0;
+
     char line[512];
     snprintf(line, sizeof(line),
-        "CAB,"
-        "%lu,%u,"           // [1] missionTime, [2] teamID
-        "%.2f,%.2f,"        // [3] altitude, [4] maxAltitude
-        "%.2f,%.2f,%.2f,%.2f,"  // [5-8] accelX/Y/Z/Mag
-        "%.2f,%.2f,%.2f,"   // [9-11] gyroX/Y/Z
-        "%.1f,%.2f,"        // [12] temperature, [13] pressure
-        "%.1f,%.1f,%.1f,"   // [14-16] pitch, roll, yaw
-        "%.2f,"             // [17] batteryVoltage
-        "%.6f,%.6f,%.1f,"   // [18-20] gpsLat, gpsLon, gpsAlt
-        "%u,%u,"            // [21] gpsSats, [22] gpsStale
-        "%u,"               // [23] A_state
-        "%u,%u,%u,%u,"      // [24-27] A_launched/apogee/separated/landed
-        "%u,"               // [28] controllerBAlive
-        "%.2f,%.2f,%.2f,%.2f," // [29-32] B_ax/ay/az, B_baro_alt
-        "%u,"               // [33] B_state
-        "%u,"               // [34] battLow
-        "%d,%d,%u",         // [35-37] rssi, snr, packet_loss
-        (unsigned long)pkt->missionTime,
-        (unsigned)TEAM_ID,
-        pkt->altitude,    pkt->maxAltitude,
-        pkt->accelX,      pkt->accelY,   pkt->accelZ,  pkt->accelMag,
-        pkt->gyroX,       pkt->gyroY,    pkt->gyroZ,
+        "CAB,%lu,%u,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,0.00,0.00,0.00,%.1f,%.2f,%.1f,%.1f,%.1f,%.2f,%.6f,%.6f,%.1f,%u,%u,%u,%u,%u,%u,%u,%u,%.2f,%.2f,%.2f,%.2f,%u,%u,%d,%d,0",
+        (unsigned long)pkt->missionTime, (unsigned)TEAM_ID,
+        pkt->altitude, pkt->maxAltitude,
+        pkt->accelX, pkt->accelY, pkt->accelZ, pkt->accelMag,
         pkt->temperature, pkt->pressure,
-        pitch, roll, yaw,
+        pkt->pitch, pkt->roll, pkt->yaw,
         pkt->batteryVoltage,
-        pkt->gpsLat,   pkt->gpsLon,   pkt->gpsAltitude,
-        (unsigned)pkt->gpsSats, (unsigned)pkt->gpsStale,
-        (unsigned)pkt->A_state,
-        (unsigned)pkt->A_launched, (unsigned)pkt->A_apogee,
-        (unsigned)pkt->A_separated,(unsigned)pkt->A_landed,
-        (unsigned)pkt->controllerBAlive,
-        pkt->B_ax,  pkt->B_ay,  pkt->B_az,  pkt->B_baro_alt,
-        (unsigned)pkt->B_state,
-        (unsigned)pkt->battLow,
-        (int)lastRSSI, (int)lastSNR, (unsigned)lastPacketLoss
+        pkt->gpsLat, pkt->gpsLon, pkt->gpsAltitude,
+        (unsigned)pkt->gpsSats, (unsigned)gpsStale,
+        (unsigned)pkt->state,
+        (unsigned)launched, (unsigned)apogee, (unsigned)separated, (unsigned)landed,
+        (unsigned)ctrlB,
+        0.0f, 0.0f, 0.0f, pkt->bAltitude,
+        (unsigned)pkt->bState, (unsigned)battLow,
+        (int)lastRSSI, (int)lastSNR
     );
     Serial.println(line);
 }
 
-// ─── CanSat packet handler ────────────────────────────────────
+// ─── CanSat Packet Handler ────────────────────────────────────
 void handleCanSatPacket(uint8_t* buf, int size) {
-    if ((size_t)size < sizeof(CanSatPacket)) return;
+    if (size < 4 + (int)sizeof(TelemetryWireCanSat)) return;
 
-    CanSatPacket* pkt = (CanSatPacket*)buf;
+    if (buf[0] != LORA_PKT_SYNC_0 || buf[1] != LORA_PKT_SYNC_1) return;
+    if (buf[2] != PKT_TELEMETRY) return;
 
-    // CRC verification
-    size_t   crcLen  = sizeof(CanSatPacket) - sizeof(uint16_t);
-    uint16_t calcCRC = crc16(buf, crcLen);
+    TelemetryWireCanSat* pkt = (TelemetryWireCanSat*)(buf + 4);
+
+    size_t crcLen = offsetof(TelemetryWireCanSat, crc);
+    uint16_t calcCRC = crc16(buf + 4, crcLen);
     if (calcCRC != pkt->crc) {
         Serial.println("GS_WARN: CanSat CRC mismatch — packet dropped");
         return;
@@ -379,45 +318,24 @@ void handleCanSatPacket(uint8_t* buf, int size) {
     lastRSSI = (int16_t)LoRa.packetRssi();
     lastSNR  = LoRa.packetSnr();
 
-    uint16_t pseudoId  = (uint16_t)(pkt->timestamp & 0xFFFF);
-    lastPacketLoss = calcPacketLoss(pseudoId,
-                                    canLastId, canRxCount,
-                                    canExpected, canFirstPkt);
-
     if (!telemetryEnabled) return;
 
-    // ── CANSAT CSV — 26 fields (protocol_spec §2.2) ────────────
     char line[512];
     snprintf(line, sizeof(line),
-        "CANSAT,"
-        "%u,%lu,%u,"        // [1] teamID, [2] timestamp, [3] state
-        "%.2f,%.2f,%.2f,"   // [4-6] ax/ay/az
-        "%.2f,%.2f,"        // [7] h_raw (displayed), [8] h_filtered (logged)
-        "%.2f,%.2f,%.2f,"   // [9-11] gx/gy/gz
-        "%.2f,%.2f,%.2f,"   // [12-14] magX/Y/Z (logged)
-        "%.6f,%.6f,%.1f,%u," // [15-18] lat, lon, alt, satcnt
-        "%.1f,%.1f,%.1f,"   // [19-21] COG, headingErr, distToTarget
-        "%.2f,"             // [22] batteryVoltage (logged)
-        "%d,%d,%u",         // [23-25] rssi, snr, packet_loss
-        (unsigned)TEAM_ID,
-        (unsigned long)pkt->timestamp,
-        (unsigned)pkt->state,
-        pkt->ax,  pkt->ay,  pkt->az,
-        pkt->h_raw, pkt->h_filtered,
-        pkt->gx,  pkt->gy,  pkt->gz,
-        pkt->magX, pkt->magY, pkt->magZ,
-        pkt->lat,  pkt->lon,  pkt->alt, (unsigned)pkt->satcnt,
-        pkt->COG,  pkt->headingErr, pkt->distToTarget,
+        "CANSAT,%u,%lu,%u,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,0.00,0.00,0.00,%.6f,%.6f,%.1f,%u,%.1f,%.1f,%.1f,%.2f,%d,%d,0",
+        (unsigned)TEAM_ID, (unsigned long)pkt->missionTime, (unsigned)pkt->state,
+        pkt->accelX, pkt->accelY, pkt->accelZ,
+        pkt->altitude, pkt->altitude,
+        pkt->pitch, pkt->roll, pkt->yaw,
+        pkt->gpsLat, pkt->gpsLon, pkt->gpsAltitude, (unsigned)pkt->gpsSats,
+        pkt->gpsCourse, pkt->headingError, pkt->targetDistance,
         pkt->batteryVoltage,
-        (int)lastRSSI, (int)lastSNR, (unsigned)lastPacketLoss
+        (int)lastRSSI, (int)lastSNR
     );
     Serial.println(line);
 }
 
-// ─── STATUS heartbeat (protocol_spec §2.3) ───────────────────
-// Fields: Marker, BmpOK, BnoOK, SdOK, FlashOK, LoraOK,
-//         GpsSearch, CtrlB, BattV, FlightNum, RSSI, SNR
-// GS PCB has no BMP/BNO/SD/Flash sensors — always report 1 (not applicable).
+// ─── STATUS Heartbeat ─────────────────────────────────────────
 void sendStatus() {
     char line[128];
     snprintf(line, sizeof(line),
@@ -427,96 +345,109 @@ void sendStatus() {
     Serial.println(line);
 }
 
-// ─── Command relay over LoRa ──────────────────────────────────
-void relayCommand(uint8_t type, uint16_t id,
-                  uint8_t* payload, uint8_t payLen) {
-    // Rebuild the exact binary frame the GUI sent
-    uint8_t frame[5 + CMD_MAX_PAYLOAD];
-    frame[0] = CMD_SYNC1;
-    frame[1] = CMD_SYNC2;
+// ─── Command Relay Over LoRa ──────────────────────────────────
+// Sends one frame on the given channel `repeats` times. endPacket() with the
+// default argument is the BLOCKING send in this library, so each copy has fully
+// left the antenna before the next one (or the retune to the CanSat channel).
+static void sendFrameOnChannel(uint32_t freq, uint8_t sf, uint8_t sync,
+                               const uint8_t* frame, uint8_t len, uint8_t repeats) {
+    LoRa.idle();
+    LoRa.setFrequency(freq);
+    LoRa.setSpreadingFactor(sf);
+    LoRa.setSyncWord(sync);
+
+    for (uint8_t r = 0; r < repeats; r++) {
+        if (LoRa.beginPacket()) {
+            LoRa.write(frame, len);
+            LoRa.endPacket();            // blocking: returns when TX is done
+        }
+        if (r + 1 < repeats) delay(CMD_REPEAT_GAP_MS);
+    }
+}
+
+void relayCommand(uint8_t type, uint16_t id, uint8_t* payload, uint8_t payLen) {
+    if (payLen > CMD_MAX_PAYLOAD) payLen = CMD_MAX_PAYLOAD;
+
+    uint8_t frame[64];
+    frame[0] = LORA_PKT_SYNC_0; // 0xA5
+    frame[1] = LORA_PKT_SYNC_1; // 0x5A
     frame[2] = type;
-    frame[3] = (uint8_t)(id & 0xFF);
-    frame[4] = (uint8_t)(id >> 8);
+    frame[3] = gsCmdSeq++;      // same seq for every repeat => A de-duplicates
+    frame[4] = payLen;
+
     if (payLen > 0 && payload != nullptr) {
         memcpy(&frame[5], payload, payLen);
     }
-    uint8_t totalLen = 5 + payLen;
 
-    // Switch to the appropriate TX frequency
-    bool toCanSat = isCanSatCommand(type);
-    LoRa.idle();
-    LoRa.setFrequency(toCanSat ? CANSAT_FREQ : AVIONICS_FREQ);
+    uint8_t hdrPlusPayLen = 5 + payLen;
+    uint16_t cmdCRC = crc16(frame, hdrPlusPayLen);
 
-    LoRa.beginPacket();
-    LoRa.write(frame, totalLen);
-    LoRa.endPacket(false);   // blocking send
+    frame[hdrPlusPayLen]     = (uint8_t)(cmdCRC >> 8);
+    frame[hdrPlusPayLen + 1] = (uint8_t)(cmdCRC & 0xFF);
+    uint8_t totalLen = hdrPlusPayLen + 2;
 
-    // Restore listening channel
-    LoRa.setFrequency(currentChannel == CH_CANSAT ? CANSAT_FREQ : AVIONICS_FREQ);
-    LoRa.receive();
+    // Identify if the command is exclusively for the CanSat
+    bool isCanSatOnly = (type == CMD_GYRO_ON || type == CMD_GYRO_OFF || type == CMD_BURN_WIRE);
+    
+    if(!isCanSatOnly){
+        // 1. Controller A (866 MHz)
+        sendFrameOnChannel(AVIONICS_FREQ, AVIONICS_SF, AVIONICS_SYNC_WORD,
+                       frame, totalLen, CMD_REPEATS_AVIONICS);
 
-    // ── ACK back to GUI (protocol_spec §3) ─────────────────────
+        delay(CMD_REPEAT_GAP_MS);
+    }
+
+    // 2. CanSat (868 MHz)
+    sendFrameOnChannel(CANSAT_FREQ, CANSAT_SF, CANSAT_SYNC_WORD,
+                       frame, totalLen, CMD_REPEATS_CANSAT);
+
+    // Restore listening channel and restart the hop timer so we don't
+    // immediately hop away after this (long, blocking) transmit sequence.
+    switchChannel(currentChannel);
+    lastHopTime = millis();
+
+    // NOTE: this only means "sent", not "A received it". A has no ACK packet yet.
     char ack[32];
     snprintf(ack, sizeof(ack), "ACK id=%u", (unsigned)id);
     Serial.println(ack);
 }
 
-// ─── Command dispatcher ───────────────────────────────────────
-void handleCommand(uint8_t type, uint16_t id,
-                   uint8_t* payload, uint8_t payLen) {
-    switch (type) {
-        case CMD_START_TELEMETRY:
-            telemetryEnabled = true;
-            relayCommand(type, id, payload, payLen);
-            break;
+void handleCommand(uint8_t type, uint16_t id, uint8_t* payload, uint8_t payLen) {
+    // FIX: START/STOP used to flip telemetryEnabled locally, which muted the GS
+    // output on STOP whether or not A actually heard the command (false
+    // "STOP works"). The GS now always shows what A is really sending, so
+    // telemetry only stops when A really stops. telemetryEnabled stays true.
 
-        case CMD_STOP_TELEMETRY:
-            telemetryEnabled = false;
-            relayCommand(type, id, payload, payLen);
-            break;
-
-        case CMD_REQUEST_STATUS:
-            // Respond with a fresh STATUS right away, then relay
-            sendStatus();
-            relayCommand(type, id, payload, payLen);
-            break;
-
-        default:
-            relayCommand(type, id, payload, payLen);
-            break;
-    }
+    if (type == CMD_GET_STATUS) sendStatus();   // GS's own heartbeat line;
+                                                // A's real status arrives as a
+                                                // STATUS,A,... line after the relay
+    relayCommand(type, id, payload, payLen);
 }
 
-// ─── Serial command parser (byte-at-a-time state machine) ────
+// ─── Serial Command Parser State Machine ──────────────────────
 void parseSerialByte(uint8_t b) {
     switch (cmdState) {
         case WAIT_SYNC1:
             if (b == CMD_SYNC1) cmdState = WAIT_SYNC2;
             break;
-
         case WAIT_SYNC2:
             cmdState = (b == CMD_SYNC2) ? WAIT_CMD : WAIT_SYNC1;
             break;
-
         case WAIT_CMD:
             cmdType       = b;
             cmdPayloadLen = 0;
             cmdPayloadIdx = 0;
             cmdState      = WAIT_ID_LSB;
             break;
-
         case WAIT_ID_LSB:
             cmdId    = b;
             cmdState = WAIT_ID_MSB;
             break;
-
         case WAIT_ID_MSB:
             cmdId |= ((uint16_t)b << 8);
-            // Determine expected payload length from command type
-            if      (cmdType == CMD_SET_TARGET_GPS)    cmdPayloadLen = 8;  // 2x float32
-            else if (cmdType == CMD_SET_QNH)           cmdPayloadLen = 4;  // 1x float32
-            else if (cmdType == CMD_SET_PD_CONSTANTS)  cmdPayloadLen = 8;  // 2x float32 stub
-            else                                       cmdPayloadLen = 0;
+            if      (cmdType == CMD_SET_SEALEVEL_HPA) cmdPayloadLen = 4;
+            else if (cmdType == CMD_SET_TARGET)       cmdPayloadLen = 8;
+            else                                      cmdPayloadLen = 0;
 
             if (cmdPayloadLen == 0) {
                 handleCommand(cmdType, cmdId, nullptr, 0);
@@ -525,7 +456,6 @@ void parseSerialByte(uint8_t b) {
                 cmdState = WAIT_PAYLOAD;
             }
             break;
-
         case WAIT_PAYLOAD:
             if (cmdPayloadIdx < CMD_MAX_PAYLOAD) {
                 cmdPayload[cmdPayloadIdx++] = b;
@@ -538,15 +468,14 @@ void parseSerialByte(uint8_t b) {
     }
 }
 
-// ─── setup() ─────────────────────────────────────────────────
+// ─── Setup ───────────────────────────────────────────────────
 void setup() {
     Serial.begin(115200);
-    // Wait for USB serial to enumerate (max 3 s)
     while (!Serial && millis() < 3000);
 
-    Serial.println("GS_INFO: AvioPro Ground Station v1.0 booting");
+    Serial.println("GS_INFO: AvioPro Ground Station v2.3 (Full Command Tester)");
+    Serial.println("GS_INFO: Commands -> s:Start, t:Stop, z:Zero, b:Beep, p:Parachute, c:CanSat, g:Status, r:Reset, q:Set QNH, x:Set Target");
 
-    // ── LoRa initialisation ───────────────────────────────────
     LoRa.setPins(LORA_NSS, LORA_RST, LORA_DIO0);
 
     if (!LoRa.begin(AVIONICS_FREQ)) {
@@ -554,39 +483,28 @@ void setup() {
         while (true);
     }
 
-    LoRa.setSpreadingFactor(LORA_SF);
     LoRa.setSignalBandwidth(LORA_BW);
     LoRa.setTxPower(LORA_TX_POWER);
     LoRa.setCodingRate4(LORA_CODING_RATE);
-    LoRa.enableCrc();        // LoRa hardware CRC (extra protection layer)
+    LoRa.enableCrc();
 
-    LoRa.receive();          // continuous RX mode
+    switchChannel(CH_AVIONICS);
 
-    currentChannel = CH_AVIONICS;
     lastHopTime    = millis();
     lastStatusTime = millis();
-
-    Serial.println("GS_INFO: LoRa OK");
-    Serial.print("GS_INFO: Avionics channel = ");
-    Serial.print(AVIONICS_FREQ / 1E6, 3);
-    Serial.println(" MHz");
-    Serial.print("GS_INFO: CanSat channel   = ");
-    Serial.print(CANSAT_FREQ / 1E6, 3);
-    Serial.println(" MHz");
-    Serial.println("GS_INFO: Ready — listening");
 }
 
-// ─── loop() ──────────────────────────────────────────────────
+// ─── Main Loop ───────────────────────────────────────────────
 void loop() {
     uint32_t now = millis();
 
-    // ── 1. Frequency hopping ─────────────────────────────────
+    // 1. Channel Hopping (1200ms Dwell)
     if (now - lastHopTime >= HOP_DWELL_MS) {
         lastHopTime = now;
         switchChannel(currentChannel == CH_AVIONICS ? CH_CANSAT : CH_AVIONICS);
     }
 
-    // ── 2. LoRa receive check ────────────────────────────────
+    // 2. Telemetry Reception
     int packetSize = LoRa.parsePacket();
     if (packetSize > 0) {
         static uint8_t rxBuf[256];
@@ -603,12 +521,91 @@ void loop() {
         }
     }
 
-    // ── 3. Serial command parser ─────────────────────────────
+    // 3. Serial Command Handling
     while (Serial.available()) {
-        parseSerialByte((uint8_t)Serial.read());
+        uint8_t b = Serial.peek();
+        
+        // If the byte is part of a GUI binary frame, pass to the parser
+        if (b == CMD_SYNC1 || cmdState != WAIT_SYNC1) {
+            parseSerialByte((uint8_t)Serial.read());
+            continue;
+        }
+        
+        // Otherwise, process ASCII keyboard shortcuts
+        b = Serial.read();
+        switch (b) {
+            case 's': case 'S':
+                Serial.println("GS_INFO: [0x02] CMD_START_TX");
+                handleCommand(CMD_START_TX, 1, nullptr, 0);
+                break;
+            case 't': case 'T':
+                Serial.println("GS_INFO: [0x03] CMD_STOP_TX");
+                handleCommand(CMD_STOP_TX, 1, nullptr, 0);
+                break;
+            case 'z': case 'Z':
+                Serial.println("GS_INFO: [0x04] CMD_SET_ZERO");
+                handleCommand(CMD_SET_ZERO, 1, nullptr, 0);
+                break;
+            case 'b': case 'B':
+                Serial.println("GS_INFO: [0x05] CMD_BEEP");
+                handleCommand(CMD_BEEP, 1, nullptr, 0);
+                break;
+            case 'e': case 'E':
+                Serial.println("GS_INFO: [0x09] CMD_ERASE_FLASH");
+                handleCommand(CMD_ERASE_FLASH, 1, nullptr, 0);
+                break;
+            case 'g': case 'G':
+                Serial.println("GS_INFO: [0x0A] CMD_GET_STATUS");
+                handleCommand(CMD_GET_STATUS, 1, nullptr, 0);
+                break;
+            case 'q': case 'Q': {
+                Serial.println("GS_INFO: [0x0B] CMD_SET_SEALEVEL_HPA (Test Payload: 1013.25 hPa)");
+                float testQNH = 1013.25f;
+                handleCommand(CMD_SET_SEALEVEL_HPA, 1, (uint8_t*)&testQNH, sizeof(float));
+                break;
+            }
+            case 'p': case 'P':
+                Serial.println("GS_INFO: [0x0C] CMD_SERVO_PARACHUTE");
+                handleCommand(CMD_SERVO_PARACHUTE, 1, nullptr, 0);
+                break;
+            case 'c': case 'C':
+                Serial.println("GS_INFO: [0x0D] CMD_SERVO_PAYLOAD");
+                handleCommand(CMD_SERVO_PAYLOAD, 1, nullptr, 0);
+                break;
+            case 'r': case 'R':
+                Serial.println("GS_INFO: [0x10] CMD_RESET_MCU");
+                handleCommand(CMD_RESET_MCU, 1, nullptr, 0);
+                break;
+            case 'x': case 'X': {
+                Serial.println("GS_INFO: [0x11] CMD_SET_TARGET (Test Payload: 19.0, 72.0)");
+                int32_t latE7 = 190000000;
+                int32_t lonE7 = 720000000;
+                uint8_t targetPayload[8];
+                memcpy(targetPayload, &latE7, 4);
+                memcpy(targetPayload + 4, &lonE7, 4);
+                handleCommand(CMD_SET_TARGET, 1, targetPayload, 8);
+                break;
+            }
+
+            case 'o': case 'O':
+                Serial.println("GS_INFO: [0x12] CMD_GYRO_ON (CanSat Only)");
+                handleCommand(CMD_GYRO_ON, 1, nullptr, 0);
+                break;
+            case 'f': case 'F':
+                Serial.println("GS_INFO: [0x13] CMD_GYRO_OFF (CanSat Only)");
+                handleCommand(CMD_GYRO_OFF, 1, nullptr, 0);
+                break;
+            case 'w': case 'W':
+                Serial.println("GS_INFO: [0x14] CMD_BURN_WIRE (CanSat Only)");
+                handleCommand(CMD_BURN_WIRE, 1, nullptr, 0);
+                break;
+                
+            default:
+                break;
+        }
     }
 
-    // ── 4. Periodic STATUS heartbeat ────────────────────────
+    // 4. Periodic Ground Station Heartbeat
     if (now - lastStatusTime >= STATUS_INTERVAL_MS) {
         lastStatusTime = now;
         sendStatus();

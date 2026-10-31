@@ -20,11 +20,9 @@ from core.command_manager import (
     CommandManager,
     CMD_START_TELEMETRY, CMD_STOP_TELEMETRY, CMD_REQUEST_STATUS,
     CMD_BUZZER_PLAY, CMD_SENSOR_ZERO,
-    CMD_ENABLE_SERVOS, CMD_DISABLE_SERVOS,
-    CMD_SERVO_L_POS, CMD_SERVO_L_NEG,
-    CMD_SERVO_R_POS, CMD_SERVO_R_NEG,
     CMD_RESET_CONTROLLER,
-    CMD_SET_TARGET_GPS, CMD_SET_PD_CONSTANTS, CMD_SPIRAL_DOWN,
+    CMD_SET_TARGET_GPS,
+    CMD_GYRO_STAB_ON, CMD_GYRO_STAB_OFF, CMD_BURN_NICHROME,
 )
 
 
@@ -117,8 +115,6 @@ class PayloadPanel(QWidget):
     def __init__(self, command_mgr: CommandManager, parent=None):
         super().__init__(parent)
         self.command_mgr = command_mgr
-        self._servos_enabled = False
-        self._flyout_visible = False
 
         self._build_ui()
         self._connect_cmd_signals()
@@ -231,45 +227,78 @@ class PayloadPanel(QWidget):
         self.btn_calibrate = _btn("calibrate", CMD_SENSOR_ZERO)
         lay.addWidget(self.btn_calibrate)
 
-        # --- Enable Servos toggle ---
-        self.btn_enable_servos = QPushButton("Enable Servos")
-        self.btn_enable_servos.setCheckable(True)
-        self.btn_enable_servos.setFixedHeight(34)
-        self.btn_enable_servos.setMinimumWidth(148)
-        self.btn_enable_servos.setStyleSheet(
-            "QPushButton { background-color: #1e2128; color: #aaa; "
-            "border: 1px solid #555; border-radius:8px; font-weight:bold; font-size:12px; padding:7px; }"
-            "QPushButton:checked { background-color: qlineargradient("
-            "x1:0,y1:0,x2:1,y2:1,stop:0 #006622,stop:1 #003311); "
-            "color:#00FF88; border: 1px solid #00FF88; }"
-            "QPushButton:hover { border: 1px solid #BB86FC; }"
-        )
-        lay.addWidget(self.btn_enable_servos)
-
-        # --- Directional servo buttons (2x2 grid) ---
-        self._servo_dir_frame = QFrame()
-        self._servo_dir_frame.setObjectName("Card")
-        dir_grid = QGridLayout(self._servo_dir_frame)
-        dir_grid.setContentsMargins(4, 4, 4, 4)
-        dir_grid.setSpacing(4)
-
-        self.btn_sl_pos = _btn("Servo_L_+ve", CMD_SERVO_L_POS)
-        self.btn_sl_neg = _btn("Servo_L_-ve", CMD_SERVO_L_NEG)
-        self.btn_sr_pos = _btn("Servo_R_+ve", CMD_SERVO_R_POS)
-        self.btn_sr_neg = _btn("Servo_R_-ve", CMD_SERVO_R_NEG)
-        dir_grid.addWidget(self.btn_sl_pos, 0, 0)
-        dir_grid.addWidget(self.btn_sl_neg, 0, 1)
-        dir_grid.addWidget(self.btn_sr_pos, 1, 0)
-        dir_grid.addWidget(self.btn_sr_neg, 1, 1)
-
-        lay.addWidget(self._servo_dir_frame)
-        self._set_servo_dir_enabled(False)  # locked until Enable Servos confirmed
-
         # --- Reset_controller ---
         self.btn_reset = _btn("Reset_controller", CMD_RESET_CONTROLLER, warning=True)
         lay.addWidget(self.btn_reset)
 
+        # ── CanSat-Specific Commands Section ─────────────────────────
+        lay.addSpacerItem(QSpacerItem(0, 8))
+
+        cansat_sep = QFrame()
+        cansat_sep.setFrameShape(QFrame.Shape.HLine)
+        cansat_sep.setStyleSheet("border: 1px solid rgba(187,134,252,0.3);")
+        lay.addWidget(cansat_sep)
+
+        cansat_label = QLabel("🛰  CanSat Commands")
+        cansat_label.setStyleSheet(
+            "color:#BB86FC; font-size:12px; font-weight:bold; padding:2px 0px;")
+        lay.addWidget(cansat_label)
+
+        # Gyro Stabilizer ON
+        self.btn_gyro_on = QPushButton("⟳  Gyro Stabilizer ON")
+        self.btn_gyro_on.setFixedHeight(36)
+        self.btn_gyro_on.setMinimumWidth(148)
+        self.btn_gyro_on.setStyleSheet(
+            "QPushButton { background-color: qlineargradient("
+            "x1:0,y1:0,x2:1,y2:1,stop:0 #0a3d2e,stop:1 #06261c); "
+            "color:#00FF88; border:2px solid rgba(0,255,136,0.5); "
+            "border-radius:8px; font-weight:bold; font-size:12px; padding:7px;}"
+            "QPushButton:hover { background-color: #0d5240; border-color:#00FF88; }"
+            "QPushButton:pressed { background-color: #116b52; }"
+        )
+        lay.addWidget(self.btn_gyro_on)
+
+        # Gyro Stabilizer OFF
+        self.btn_gyro_off = QPushButton("⏹  Gyro Stabilizer OFF")
+        self.btn_gyro_off.setFixedHeight(36)
+        self.btn_gyro_off.setMinimumWidth(148)
+        self.btn_gyro_off.setStyleSheet(
+            "QPushButton { background-color: qlineargradient("
+            "x1:0,y1:0,x2:1,y2:1,stop:0 #3d2e0a,stop:1 #261c06); "
+            "color:#FFB347; border:2px solid rgba(255,179,71,0.5); "
+            "border-radius:8px; font-weight:bold; font-size:12px; padding:7px;}"
+            "QPushButton:hover { background-color: #52400d; border-color:#FFB347; }"
+            "QPushButton:pressed { background-color: #6b5211; }"
+        )
+        lay.addWidget(self.btn_gyro_off)
+
+        # Burn Nichrome Wire — high-consequence, visually distinct
+        lay.addSpacing(4)
+
+        burn_sep = QFrame()
+        burn_sep.setFrameShape(QFrame.Shape.HLine)
+        burn_sep.setStyleSheet("border: 1px solid rgba(255,80,80,0.3);")
+        lay.addWidget(burn_sep)
+
+        burn_label = QLabel("⚠  IRREVERSIBLE")
+        burn_label.setStyleSheet("color:#FF4444; font-size:11px; font-weight:bold;")
+        lay.addWidget(burn_label)
+
+        self.btn_burn_nichrome = QPushButton("🔥  Burn Nichrome Wire")
+        self.btn_burn_nichrome.setFixedHeight(38)
+        self.btn_burn_nichrome.setMinimumWidth(148)
+        self.btn_burn_nichrome.setStyleSheet(
+            "QPushButton { background-color: qlineargradient("
+            "x1:0,y1:0,x2:1,y2:1,stop:0 #7a0000,stop:1 #330000); "
+            "color:#FF6666; border:2px solid rgba(255,80,80,0.6); "
+            "border-radius:8px; font-weight:bold; font-size:12px; padding:7px;}"
+            "QPushButton:hover { background-color: #880000; color:#FF8888; }"
+            "QPushButton:pressed { background-color: #aa0000; }"
+        )
+        lay.addWidget(self.btn_burn_nichrome)
+
         # --- Additional_options flyout ---
+        lay.addSpacerItem(QSpacerItem(0, 8))
         self.btn_additional = QPushButton("Additional_options ▸")
         self.btn_additional.setFixedHeight(34)
         self.btn_additional.setMinimumWidth(148)
@@ -361,53 +390,6 @@ class PayloadPanel(QWidget):
         )
         adv_lay.addWidget(self.btn_set_target)
 
-        # Set PD constants (stub)
-        pd_lbl = QLabel("PD Constants (TBD)"); pd_lbl.setObjectName("CardTitle")
-        adv_lay.addWidget(pd_lbl)
-        self._pd_stubs = {}
-        for name in ("Kp", "Kd", "Fuzzy_α"):
-            row = QHBoxLayout(); row.setSpacing(4)
-            fl = QLabel(f"{name}:"); fl.setObjectName("FieldLabel"); fl.setFixedWidth(56)
-            spin = QDoubleSpinBox()
-            spin.setRange(0, 1000); spin.setDecimals(3); spin.setValue(1.0); spin.setFixedWidth(80)
-            spin.setStyleSheet(
-                "QDoubleSpinBox { background:#1a1d24; color:#fff; "
-                "border:1px solid rgba(187,134,252,0.3); border-radius:4px; padding:2px 4px;}"
-            )
-            row.addWidget(fl); row.addWidget(spin)
-            adv_lay.addLayout(row)
-            self._pd_stubs[name] = spin
-
-        self.btn_set_pd = QPushButton("Send PD Constants")
-        self.btn_set_pd.setFixedHeight(30)
-        self.btn_set_pd.setStyleSheet(
-            "QPushButton { background-color:#2a1060; color:#BB86FC; "
-            "border:1px solid rgba(187,134,252,0.4); border-radius:6px; font-size:11px;}"
-            "QPushButton:hover { background-color:#3a1880; }"
-        )
-        adv_lay.addWidget(self.btn_set_pd)
-
-        # Spiral Down — high-consequence, visually separated
-        adv_lay.addSpacing(8)
-        spiral_sep = QFrame(); spiral_sep.setFrameShape(QFrame.Shape.HLine)
-        spiral_sep.setStyleSheet("border: 1px solid rgba(255,80,80,0.3);")
-        adv_lay.addWidget(spiral_sep)
-
-        spiral_label = QLabel("⚠  EMERGENCY")
-        spiral_label.setStyleSheet("color:#FF4444; font-size:11px; font-weight:bold;")
-        adv_lay.addWidget(spiral_label)
-
-        self.btn_spiral_down = QPushButton("Spiral Down")
-        self.btn_spiral_down.setFixedHeight(34)
-        self.btn_spiral_down.setStyleSheet(
-            "QPushButton { background-color: qlineargradient("
-            "x1:0,y1:0,x2:1,y2:1,stop:0 #7a0000,stop:1 #330000); "
-            "color:#FF6666; border:2px solid rgba(255,80,80,0.6); "
-            "border-radius:8px; font-weight:bold; font-size:12px;}"
-            "QPushButton:hover { background-color: #880000; color:#FF8888; }"
-        )
-        adv_lay.addWidget(self.btn_spiral_down)
-
         lay.addWidget(self.advanced_frame)
         lay.addStretch()
 
@@ -429,19 +411,17 @@ class PayloadPanel(QWidget):
         self.btn_calibrate.clicked.connect(
             lambda: self.command_mgr.send_command(CMD_SENSOR_ZERO))
 
-        self.btn_enable_servos.clicked.connect(self._handle_enable_servos)
-        self.btn_sl_pos.clicked.connect(lambda: self.command_mgr.send_command(CMD_SERVO_L_POS))
-        self.btn_sl_neg.clicked.connect(lambda: self.command_mgr.send_command(CMD_SERVO_L_NEG))
-        self.btn_sr_pos.clicked.connect(lambda: self.command_mgr.send_command(CMD_SERVO_R_POS))
-        self.btn_sr_neg.clicked.connect(lambda: self.command_mgr.send_command(CMD_SERVO_R_NEG))
-
         self.btn_reset.clicked.connect(self._confirm_reset)
         self.btn_additional.toggled.connect(self._toggle_flyout)
         self.btn_advanced_toggle.toggled.connect(self._toggle_advanced)
 
         self.btn_set_target.clicked.connect(self._send_target_gps)
-        self.btn_set_pd.clicked.connect(self._send_pd_constants)
-        self.btn_spiral_down.clicked.connect(self._confirm_spiral_down)
+
+        # CanSat-specific commands
+        self.btn_gyro_on.clicked.connect(self._confirm_gyro_on)
+        self.btn_gyro_off.clicked.connect(
+            lambda: self.command_mgr.send_command(CMD_GYRO_STAB_OFF))
+        self.btn_burn_nichrome.clicked.connect(self._confirm_burn_nichrome)
 
         self.command_mgr.command_state_changed.connect(self._on_cmd_state)
 
@@ -451,43 +431,12 @@ class PayloadPanel(QWidget):
             CMD_REQUEST_STATUS:  self.btn_status,
             CMD_BUZZER_PLAY:     self.btn_buzzer,
             CMD_SENSOR_ZERO:     self.btn_calibrate,
-            CMD_SERVO_L_POS:     self.btn_sl_pos,
-            CMD_SERVO_L_NEG:     self.btn_sl_neg,
-            CMD_SERVO_R_POS:     self.btn_sr_pos,
-            CMD_SERVO_R_NEG:     self.btn_sr_neg,
             CMD_RESET_CONTROLLER: self.btn_reset,
         }
 
     # ──────────────────────────────────────────────────────────────────
     # Command helpers
     # ──────────────────────────────────────────────────────────────────
-
-    def _handle_enable_servos(self, checked):
-        if checked:
-            ok = ConfirmationDialog.confirm(
-                self,
-                "Enable Payload Servos",
-                "Enabling servos will allow directional nudge commands "
-                "to be sent freely without per-click confirmation.\n"
-                "Confirm to enable, or cancel to keep servos locked.",
-            )
-            if ok:
-                self._servos_enabled = True
-                self._set_servo_dir_enabled(True)
-                self.command_mgr.send_command(CMD_ENABLE_SERVOS)
-            else:
-                # Revert toggle
-                self.btn_enable_servos.setChecked(False)
-        else:
-            # Disabling — no confirmation required
-            self._servos_enabled = False
-            self._set_servo_dir_enabled(False)
-            self.command_mgr.send_command(CMD_DISABLE_SERVOS)
-
-    def _set_servo_dir_enabled(self, enabled: bool):
-        for btn in (self.btn_sl_pos, self.btn_sl_neg,
-                    self.btn_sr_pos, self.btn_sr_neg):
-            btn.setEnabled(enabled)
 
     def _confirm_reset(self):
         ok = ConfirmationDialog.confirm(
@@ -499,6 +448,28 @@ class PayloadPanel(QWidget):
         )
         if ok:
             self.command_mgr.send_command(CMD_RESET_CONTROLLER)
+
+    def _confirm_gyro_on(self):
+        ok = ConfirmationDialog.confirm(
+            self,
+            "Enable Gyro Stabilizer",
+            "This will activate the gyro stabilizer on the CanSat.\n"
+            "Ensure the CanSat is in a safe orientation before enabling.",
+        )
+        if ok:
+            self.command_mgr.send_command(CMD_GYRO_STAB_ON)
+
+    def _confirm_burn_nichrome(self):
+        ok = ConfirmationDialog.confirm(
+            self,
+            "Burn Nichrome Wire",
+            "⚠  This will PERMANENTLY burn the nichrome wire.\n\n"
+            "This action is IRREVERSIBLE and cannot be undone.\n"
+            "Ensure the CanSat is at the correct deployment altitude.",
+            warning=True,
+        )
+        if ok:
+            self.command_mgr.send_command(CMD_BURN_NICHROME)
 
     def _toggle_flyout(self, checked):
         self.flyout.setVisible(checked)
@@ -513,28 +484,11 @@ class PayloadPanel(QWidget):
     def _send_target_gps(self):
         lat = self.tgt_lat.value()
         lon = self.tgt_lon.value()
+        # GS firmware expects float32 lat + float32 lon, then converts to int32 E7
         payload = struct.pack("<ff", lat, lon)
         self.command_mgr.send_command(CMD_SET_TARGET_GPS, payload)
         # Show target on map
         self.gps_map.set_target(lat, lon)
-
-    def _send_pd_constants(self):
-        # Stub: pack whatever fields are defined. Firmware TBD.
-        values = [s.value() for s in self._pd_stubs.values()]
-        payload = struct.pack(f"<{len(values)}f", *values)
-        self.command_mgr.send_command(CMD_SET_PD_CONSTANTS, payload)
-
-    def _confirm_spiral_down(self):
-        ok = ConfirmationDialog.confirm(
-            self,
-            "Activate Spiral Down",
-            "⚠  This will command the CanSat to enter an emergency spiral descent.\n\n"
-            "Use ONLY when the CanSat is drifting dangerously off-target.\n"
-            "This action cannot be undone mid-flight.",
-            warning=True,
-        )
-        if ok:
-            self.command_mgr.send_command(CMD_SPIRAL_DOWN)
 
     # ──────────────────────────────────────────────────────────────────
     # CommandManager feedback

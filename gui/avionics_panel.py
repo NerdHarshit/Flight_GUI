@@ -31,7 +31,7 @@ from gui.confirmation_dialog import ConfirmationDialog
 from core.command_manager import (
     CommandManager,
     CMD_START_TELEMETRY, CMD_STOP_TELEMETRY, CMD_REQUEST_STATUS,
-    CMD_BUZZER_PLAY, CMD_CALIBRATION_MODE, CMD_SENSOR_ZERO,
+    CMD_BUZZER_PLAY, CMD_SENSOR_ZERO,
     CMD_SERVO_PARACHUTE, CMD_SERVO_PAYLOAD, CMD_RESET_CONTROLLER,
     CMD_SET_QNH,
     CMD_NAMES,
