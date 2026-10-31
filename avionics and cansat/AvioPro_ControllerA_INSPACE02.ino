@@ -37,7 +37,7 @@
 //      of when they arrive.
 //    - New commands: CMD_GET_STATUS, CMD_SET_SEALEVEL_HPA (float
 //      payload, falls back to the built-in constant if bad/missing),
-//      CMD_SERVO_PARACHUTE / CMD_SERVO_PAYLOAD (see below),
+//      CMD_SERVO_*_OPEN / CMD_SERVO_*_CLOSE (see below),
 //      CMD_RESET_MCU (honored ONLY from LAUNCH_PAD, GUI confirms first).
 //    - int16 telemetry compaction was explicitly asked to be held off
 //      until radio-range testing decides if it's needed — NOT done here.
@@ -49,9 +49,11 @@
 //    - TEST_MODE state and CMD_TEST_MODE / CMD_SIM_LAUNCH /
 //      CMD_SIM_APOGEE removed. Retired IDs/state numbers are left as
 //      gaps so every remaining value is unchanged.
-//    - Servo commands: one GUI click = one command = one non-blocking
-//      0->90->0 latch cycle (SERVO_CYCLE_HOLD_MS). The autonomous apogee
-//      path just opens and stops, and cancels any cycle in progress.
+//    - Servo commands: individual OPEN and CLOSE per door (0x0C/0x0D open,
+//      0x0E/0x0F close). No automatic 0->90->0 cycle any more. Manual
+//      commands never move both servos within SERVO_STAGGER_MS of each
+//      other; manual CLOSE is refused in flight (only LAUNCH_PAD / IMPACT).
+//    - CMD_SET_BENCH_MODE (0x12): runtime bench-mode flag, see above.
 //    - On-air telemetry is now the packed 78-byte TelemetryWire: gyro
 //      dropped (ground derives rates from pitch/roll/yaw), 7 flags in a
 //      bitmask, and B's state / baro altitude / accel magnitude added.
@@ -68,6 +70,7 @@
 #include <Adafruit_BMP3XX.h>
 #include <MPU6500_WE.h>
 #include <TinyGPSPlus.h>
+#include <stddef.h>                // offsetof() for the StatusPacket layout check
 #include <EEPROM.h>                // flash-backed EEPROM emulation on Pico
 #include "hardware/watchdog.h"     // Pico SDK — RP2350 hardware watchdog
 #include <LoRa.h>                  // Sandeep Mistry LoRa library
@@ -81,18 +84,25 @@
 #define DEBUG_SERIAL
 
 // ----------------------------------------------------------------
-//  BENCH_TEST_MODE — LAB TESTING ONLY. REMOVE BEFORE REAL FLIGHT.
-//  1) Forces a clean slate on every boot (ignores any flight state
-//     saved in EEPROM from the previous run).
-//  2) Buzzer output is redirected to the onboard LED (GPIO26 here)
-//     since no physical buzzer is wired up on the bench.
-//  (There is no ARM command any more — launch detection is always live
-//  from LAUNCH_PAD, so this flag no longer auto-arms anything.)
-//  SAFETY: this does NOT disable deployment. If apogee is detected,
+//  BENCH MODE — now a RUNTIME setting (CMD_SET_BENCH_MODE 0x12, uplink),
+//  stored in EEPROM so it survives a reboot. No reflash needed at the pad.
+//    ON  : every boot forces a clean slate (ignores flight state saved in
+//          EEPROM by the previous run) — what you want on the bench / pad.
+//    OFF : flight behaviour — after a mid-flight reset the saved flight
+//          state is RESUMED (deployment logic keeps working).
+//  Rules (enforced in processCommand):
+//    - OFF is accepted in any state.
+//    - ON is accepted only on the pad (LAUNCH_PAD) or after landing (IMPACT).
+//    - Launch detection automatically switches bench mode OFF and saves
+//      it, so a forgotten flag can never wipe the flight state mid-flight.
+//  BENCH_MODE_DEFAULT is what a never-configured board starts with.
+//
+//  The #define below now only selects the buzzer wiring: ON routes the beep
+//  to GPIO26 (onboard LED stand-in) as well as the real buzzer on GPIO27.
+//  It no longer changes any flight/EEPROM behaviour.
+//  SAFETY: bench mode does NOT disable deployment. If apogee is detected,
 //  both bay-door servos still move for real. Disconnect the servo
 //  linkage before running a full-sequence test on the bench.
-//  !! For the competition build this flag must be OFF so the startup
-//  !! beeps come out of the real buzzer — see notes in the changelog.
 // ----------------------------------------------------------------
 #define BENCH_TEST_MODE
 
@@ -274,6 +284,12 @@
 #define EEPROM_MAGIC_ADDR      0
 #define EEPROM_STATE_ADDR      4
 #define EEPROM_FLIGHTNUM_ADDR  64
+#define EEPROM_BENCH_ADDR      72      // 1 byte: BENCH_TAG_ON / BENCH_TAG_OFF (anything else = default)
+#define BENCH_TAG_OFF          0xB0
+#define BENCH_TAG_ON           0xB1
+#define BENCH_MODE_DEFAULT     true    // value for a board that was never configured by uplink
+
+bool benchMode = BENCH_MODE_DEFAULT;   // runtime flag, loaded from EEPROM in setup()
 
 // ----------------------------------------------------------------
 //  I2C ADDRESSES
@@ -356,10 +372,13 @@ enum LoRaCmd : uint8_t {
     // -- added for competition GUI-verification workflow --
     CMD_GET_STATUS       = 0x0A,  // on-demand sensor-health / go-no-go packet, any time, any state
     CMD_SET_SEALEVEL_HPA = 0x0B,  // payload = float32 hPa. Bad/missing payload -> keep fallback constant
-    CMD_SERVO_PARACHUTE  = 0x0C,  // GUI one-click: parachute bay latch does a full 0->90->0 cycle
-    CMD_SERVO_PAYLOAD    = 0x0D,  // GUI one-click: CanSat bay latch does a full 0->90->0 cycle
-    // 0x0E-0x0F retired (separate open/close commands replaced by the single-cycle commands above)
+    CMD_SERVO_PARACHUTE_OPEN  = 0x0C,  // parachute bay latch -> SERVO_OPEN_POS (stays open)
+    CMD_SERVO_PAYLOAD_OPEN    = 0x0D,  // CanSat bay latch    -> SERVO_OPEN_POS (stays open)
+    CMD_SERVO_PARACHUTE_CLOSE = 0x0E,  // parachute bay latch -> SERVO_CLOSED_POS (LAUNCH_PAD / IMPACT only)
+    CMD_SERVO_PAYLOAD_CLOSE   = 0x0F,  // CanSat bay latch    -> SERVO_CLOSED_POS (LAUNCH_PAD / IMPACT only)
     CMD_RESET_MCU        = 0x10,  // last-resort reset. Honored ONLY from LAUNCH_PAD (GUI confirms first)
+    // 0x11 is used by the ground station for CMD_SET_TARGET (CanSat) — A ignores it
+    CMD_SET_BENCH_MODE   = 0x12,  // payload = 1 byte: 1 = bench ON (clean slate each boot), 0 = OFF (flight)
 };
 
 // Downlink frames now carry an explicit type byte (3rd byte, right after the
@@ -490,8 +509,11 @@ struct StatusPacket {
     bool     ctrlBAlive;      // No Controller B in this test — always false
     float    battV;
     uint8_t  flightNumber;
+    bool     benchMode;       // fills the old padding byte: struct stays 16 bytes, crc stays at offset 14
     uint16_t crc;
 };
+static_assert(sizeof(StatusPacket) == 16, "StatusPacket must stay 16 bytes — ground station mirrors it");
+static_assert(offsetof(StatusPacket, crc) == 14, "StatusPacket crc offset must stay 14");
 
 struct LogEntry {
     uint32_t missionTime;
@@ -808,6 +830,22 @@ void clearSavedState() {
     EEPROM.put(EEPROM_MAGIC_ADDR, blank);
     EEPROM.commit();
     DEBUG_PRINTLN(F("EEPROM: cleared"));
+}
+
+// Bench-mode flag lives in its own EEPROM byte, so clearSavedState() (which
+// only blanks the magic word) never touches it.
+void loadBenchFlag() {
+    uint8_t tag = 0;
+    EEPROM.get(EEPROM_BENCH_ADDR, tag);
+    if      (tag == BENCH_TAG_ON)  benchMode = true;
+    else if (tag == BENCH_TAG_OFF) benchMode = false;
+    else                           benchMode = BENCH_MODE_DEFAULT;
+}
+
+void saveBenchFlag(bool on) {
+    uint8_t tag = on ? BENCH_TAG_ON : BENCH_TAG_OFF;
+    EEPROM.put(EEPROM_BENCH_ADDR, tag);
+    EEPROM.commit();
 }
 
 // ================================================================
@@ -1525,74 +1563,67 @@ bool detectLanding() {
 //  DEPLOYMENT ACTIONS
 // ================================================================
 // -- low-level bay-door actuators, no gating --
+// Each one stamps its servo's last-move time so manual commands can keep the
+// two servos from moving together (supply limit ~2 A; an MG996R can draw
+// ~2.5 A stalled).
+uint32_t lastCansatMoveMs    = 0;   // 0 = never moved
+uint32_t lastParachuteMoveMs = 0;
+
 void openCansatBayDoor() {
     separationServo.write(SERVO_OPEN_POS);
+    lastCansatMoveMs = millis();
 }
 void closeCansatBayDoor() {
     separationServo.write(SERVO_CLOSED_POS);
+    lastCansatMoveMs = millis();
 }
 void openParachuteBayDoor() {
     parachuteServo.write(SERVO_OPEN_POS);
+    lastParachuteMoveMs = millis();
 }
 void closeParachuteBayDoor() {
     parachuteServo.write(SERVO_CLOSED_POS);
+    lastParachuteMoveMs = millis();
 }
 
 // ----------------------------------------------------------------
-//  GUI-TRIGGERED ONE-SHOT SERVO CYCLE (non-blocking)
-//  One GUI click -> one uplink command -> latch goes to SERVO_OPEN_POS,
-//  holds for SERVO_CYCLE_HOLD_MS, then returns to SERVO_CLOSED_POS.
-//  Runs off millis() from updateServoCycles() in loop(), so the watchdog,
-//  telemetry and command RX keep running during the ~1.5s cycle.
-//  The autonomous apogee path does NOT use this — it opens and stops.
+//  MANUAL SERVO COMMANDS (uplink): one command = one move, no timers.
+//  OPEN/CLOSE are separate commands per door; the latch stays where it
+//  was sent until the next command.
 // ----------------------------------------------------------------
-#define SERVO_CYCLE_HOLD_MS  1500   // TUNE: how long the latch dwells at the open position
+// Autonomous deployment order: CanSat door first, parachute door second, never
+// both servos moving at once. The chute door is only commanded this long after
+// the CanSat door.
+#define CHUTE_DEPLOY_DELAY_MS  800  // TUNE on the bench: CanSat servo travel + settle + margin
+uint32_t cansatReleaseMs = 0;       // millis() when the CanSat door was last commanded open
 
-struct ServoCycle {
-    bool     active;
-    uint32_t startMs;
-};
-ServoCycle parachuteCycle = {false, 0};
-ServoCycle cansatCycle    = {false, 0};
+// A manual command for one door is refused while the OTHER door was moved
+// less than this long ago (the operator just resends).
+#define SERVO_STAGGER_MS  CHUTE_DEPLOY_DELAY_MS
 
-void startParachuteCycle() {
-    if (parachuteCycle.active) return;          // already mid-cycle — ignore the repeat
-    openParachuteBayDoor();
-    parachuteCycle.active  = true;
-    parachuteCycle.startMs = millis();
+static bool otherServoSettled(uint32_t otherLastMoveMs) {
+    return otherLastMoveMs == 0 || (millis() - otherLastMoveMs) >= SERVO_STAGGER_MS;
 }
-void startCansatCycle() {
-    if (cansatCycle.active) return;
-    openCansatBayDoor();
-    cansatCycle.active  = true;
-    cansatCycle.startMs = millis();
-}
-void updateServoCycles() {
-    uint32_t now = millis();
-    if (parachuteCycle.active && (now - parachuteCycle.startMs >= SERVO_CYCLE_HOLD_MS)) {
-        closeParachuteBayDoor();
-        parachuteCycle.active = false;
-    }
-    if (cansatCycle.active && (now - cansatCycle.startMs >= SERVO_CYCLE_HOLD_MS)) {
-        closeCansatBayDoor();
-        cansatCycle.active = false;
-    }
+
+// Manual CLOSE would re-latch a door the autonomous logic just opened, so it
+// is only allowed on the pad or after landing. Manual OPEN works in any state
+// (doubles as the last-resort manual release).
+static bool manualCloseAllowed() {
+    return state == LAUNCH_PAD || state == IMPACT;
 }
 
 // -- autonomous deployment path (apogee-triggered): open and STOP --
-// No close movement. If a GUI cycle happens to be in progress on the same
-// door, the autonomous open wins: the pending close is cancelled.
+// No close movement.
 void triggerSeparation() {
     DEBUG_PRINTLN(F("SEP: opening CanSat bay door servo"));
-    cansatCycle.active = false;
     openCansatBayDoor();
+    cansatReleaseMs = millis();
     separated = true;
     scheduleBeep(500);
 }
 
 void deployParachute() {
     DEBUG_PRINTLN(F("CHUTE: opening parachute bay door servo"));
-    parachuteCycle.active = false;
     openParachuteBayDoor();
     scheduleBeep(500);
 }
@@ -1617,6 +1648,10 @@ void updateStateMachine() {
                 launchElapsedMs  = launchTime - missionStartTime;
                 altitudeAtLaunch = altitudeFiltered;
                 telemetry.maxAltitude = 0.0f;   // fresh peak tracking starts exactly at launch
+                if (benchMode) {                // never carry bench mode into flight: a mid-flight
+                    benchMode = false;          // reset must RESUME the saved state, not wipe it
+                    saveBenchFlag(false);
+                }
                 saveState();
                 setState(ASCENT);
                 scheduleBeep(100);
@@ -1637,6 +1672,8 @@ void updateStateMachine() {
                 }
                 apogeeDetected = true;
                 apogeeTime     = millis();
+                //added cansat separation here as it must be released first before deploying rocket parachute.
+                triggerSeparation();
                 setState(PAYLOAD_SEP);
                 scheduleBeep(100);
                 scheduleBeep(100);
@@ -1646,9 +1683,13 @@ void updateStateMachine() {
 
         case PAYLOAD_SEP:
             if (!deploymentFired) {
+                // Non-blocking stagger: the CanSat door was opened at apogee.
+                // Stay in PAYLOAD_SEP (loop keeps running at full rate) until
+                // its servo has finished moving, THEN drive the chute servo.
+                if (millis() - cansatReleaseMs < CHUTE_DEPLOY_DELAY_MS) break;
+
                 deploymentFired = true;
                 saveState();
-                triggerSeparation();
                 deployParachute();
                 scheduleBeep(100);
             }
@@ -1783,20 +1824,74 @@ void processCommand(uint8_t cmdId, uint8_t seq, const uint8_t* payload, uint8_t 
             break;
         }
 
-        case CMD_SERVO_PARACHUTE:
-            // GUI one-click (confirmed GUI-side). Works in any flight state —
-            // doubles as the last-resort manual parachute release. Latch does
-            // 0->90->0 on its own; only ever triggered by this command.
-            startParachuteCycle();
+        case CMD_SERVO_PARACHUTE_OPEN:
+            if (!otherServoSettled(lastCansatMoveMs)) {
+                DEBUG_PRINTLN(F("CMD: SERVO_PARACHUTE_OPEN refused — CanSat servo still moving, resend"));
+                break;
+            }
+            openParachuteBayDoor();
             scheduleBeep(100);
-            DEBUG_PRINTLN(F("CMD: SERVO_PARACHUTE (cycle)"));
+            DEBUG_PRINTLN(F("CMD: SERVO_PARACHUTE_OPEN"));
             break;
 
-        case CMD_SERVO_PAYLOAD:
-            startCansatCycle();
+        case CMD_SERVO_PAYLOAD_OPEN:
+            if (!otherServoSettled(lastParachuteMoveMs)) {
+                DEBUG_PRINTLN(F("CMD: SERVO_PAYLOAD_OPEN refused — parachute servo still moving, resend"));
+                break;
+            }
+            openCansatBayDoor();
             scheduleBeep(100);
-            DEBUG_PRINTLN(F("CMD: SERVO_PAYLOAD (cycle)"));
+            DEBUG_PRINTLN(F("CMD: SERVO_PAYLOAD_OPEN"));
             break;
+
+        case CMD_SERVO_PARACHUTE_CLOSE:
+            if (!manualCloseAllowed()) {
+                DEBUG_PRINTLN(F("CMD: SERVO_PARACHUTE_CLOSE refused — only on pad / after landing"));
+                break;
+            }
+            if (!otherServoSettled(lastCansatMoveMs)) {
+                DEBUG_PRINTLN(F("CMD: SERVO_PARACHUTE_CLOSE refused — CanSat servo still moving, resend"));
+                break;
+            }
+            closeParachuteBayDoor();
+            scheduleBeep(100);
+            DEBUG_PRINTLN(F("CMD: SERVO_PARACHUTE_CLOSE"));
+            break;
+
+        case CMD_SERVO_PAYLOAD_CLOSE:
+            if (!manualCloseAllowed()) {
+                DEBUG_PRINTLN(F("CMD: SERVO_PAYLOAD_CLOSE refused — only on pad / after landing"));
+                break;
+            }
+            if (!otherServoSettled(lastParachuteMoveMs)) {
+                DEBUG_PRINTLN(F("CMD: SERVO_PAYLOAD_CLOSE refused — parachute servo still moving, resend"));
+                break;
+            }
+            closeCansatBayDoor();
+            scheduleBeep(100);
+            DEBUG_PRINTLN(F("CMD: SERVO_PAYLOAD_CLOSE"));
+            break;
+
+        case CMD_SET_BENCH_MODE: {
+            if (payloadLen != 1 || payload[0] > 1) {
+                DEBUG_PRINTLN(F("CMD: SET_BENCH_MODE rejected — payload must be 1 byte, 0 or 1"));
+                break;
+            }
+            bool want = (payload[0] == 1);
+            // Turning bench ON in flight would make a mid-flight reset wipe the
+            // saved flight state, so ON is only honored on the pad / after landing.
+            if (want && !(state == LAUNCH_PAD || state == IMPACT)) {
+                DEBUG_PRINTLN(F("CMD: SET_BENCH_MODE ON refused — only on pad / after landing"));
+                break;
+            }
+            benchMode = want;
+            saveBenchFlag(want);
+            scheduleBeep(want ? 300 : 100);
+            DEBUG_PRINT(F("CMD: SET_BENCH_MODE = "));
+            DEBUG_PRINTLN(want ? F("ON (clean slate every boot)") : F("OFF (flight: resume after reset)"));
+            sendStatusPacket();   // status frame carries the flag so the ground station can confirm it
+            break;
+        }
 
         case CMD_RESET_MCU:
             if (state == LAUNCH_PAD) {
@@ -1887,19 +1982,22 @@ void sendLoRaTelemetry() {
     LoRa.write(PKT_TELEMETRY);
     LoRa.write(loraTxSeq++);
     LoRa.write((const uint8_t*)&wire, sizeof(TelemetryWire));
+    // NOTE: in this library endPacket(false) is the BLOCKING send (async=false).
+    // It returns only when the ~257 ms frame is fully on air, so the radio is
+    // idle again by the time we get here and the RX side can be armed at once.
     LoRa.endPacket(false);
 
     loraLastTxTime = millis();
 }
 
 void checkLoRaRx() {
-    // parsePacket() switches the radio to RX, which would ABORT a frame that is
-    // still on air — so only poll when the radio is not transmitting. This
-    // replaces the old "80 ms since last TX" guard, which (because TX and RX
-    // ran in the same 100 ms tick) blocked RX every time while telemetry was on.
+    // No "recently transmitted" guard here. TX is blocking (endPacket(false)),
+    // so whenever this runs the radio is not transmitting and parsePacket()
+    // can safely arm single-RX. The old 250 ms guard was measured from the
+    // END of the blocking TX, which kept the receiver off for the whole
+    // 243 ms gap between telemetry frames, i.e. A never listened while
+    // downlink was on.
     if (!loraReady) return;
-    // Guard window: wait 250ms after transmitting before checking RX buffer
-    if (millis() - loraLastTxTime < 250) return;
 
     int packetSize = LoRa.parsePacket();
     if (packetSize < LORA_CMD_MIN_LEN) return;
@@ -1986,6 +2084,7 @@ StatusPacket buildStatusPacket() {
     sp.ctrlBAlive   = ctrlB.alive;
     sp.battV        = readBatteryVoltage();
     sp.flightNumber = flightNumber;
+    sp.benchMode    = benchMode;
 
     sp.crc = calculateCRC(
         (const uint8_t*)&sp,
@@ -2016,7 +2115,8 @@ void sendStatusPacket() {
         LoRa.write(LORA_PKT_SYNC_1);
         LoRa.write(PKT_STATUS);
         LoRa.write((const uint8_t*)&sp, sizeof(StatusPacket));
-        LoRa.endPacket(false);
+        LoRa.endPacket(false);   // false = blocking (~103 ms), see sendLoRaTelemetry()
+        loraLastTxTime = millis();
     }
 }
 
@@ -2109,6 +2209,7 @@ void setup() {
     }
 
     EEPROM.begin(256);
+    loadBenchFlag();
     bool resumed = loadState();
 
     pinMode(BUZZER_PIN,    OUTPUT);
@@ -2238,17 +2339,17 @@ void setup() {
     }
     (void)controllerBFound;  // informational only — B being absent doesn't block GO
 
-    #ifdef BENCH_TEST_MODE
-        // Lab testing only: always force a clean slate on every boot,
-        // ignoring whatever flight state EEPROM remembers from the last
-        // run. Without this, a test that reached IMPACT will resume
-        // straight into IMPACT forever on every subsequent power-cycle,
-        // silently blocking any further launch/apogee testing until the
-        // EEPROM is cleared some other way. Real flight builds must NOT
-        // do this — resuming saved state after an in-flight reboot is
-        // the correct, intended behavior there.
+    // Runtime bench mode (uplink-settable, stored in EEPROM): when ON, always
+    // force a clean slate on boot, ignoring whatever flight state EEPROM
+    // remembers from the last run (otherwise a test that reached IMPACT would
+    // resume into IMPACT forever). When OFF (flight), a reset RESUMES the saved
+    // state, which is the correct behaviour after an in-flight reboot.
+    if (benchMode) {
         resumed = false;
-    #endif
+        Serial.println(F("BENCH MODE ON — clean slate every boot"));
+    } else {
+        Serial.println(F("BENCH MODE OFF — flight behaviour, saved state resumes after a reset"));
+    }
 
     if (!resumed) {
         clearSavedState();
@@ -2264,11 +2365,10 @@ void setup() {
 
         if (state == PAYLOAD_SEP && !deploymentFired) {
             Serial.println(F("Re-firing deployment"));
-            deploymentFired = true;
-            saveState();
+            // setup() just re-closed both doors, so re-open the CanSat door
+            // now; the state machine fires the chute door CHUTE_DEPLOY_DELAY_MS
+            // later (never both servos at once, even after a reboot).
             triggerSeparation();
-            deployParachute();
-            setState(DESCENT);
         } else if (state == PAYLOAD_SEP && deploymentFired) {
             setState(DESCENT);
         }
@@ -2303,7 +2403,6 @@ void loop() {
     }
 
     taskBuzzerTick(now);
-    updateServoCycles();
 
     if (runTask(taskGPSDrain, now)) {
         drainGPS();

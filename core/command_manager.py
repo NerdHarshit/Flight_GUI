@@ -12,39 +12,50 @@ from enum import Enum
 # ─── Command type constants ─────────────────────────────────────────
 # These opcodes MUST match the ground_station.ino defines exactly.
 # The GS relays the opcode byte directly as the vehicle LoRa command.
-CMD_START_TELEMETRY   = 0x02   # CMD_START_TX
-CMD_STOP_TELEMETRY    = 0x03   # CMD_STOP_TX
-CMD_SENSOR_ZERO       = 0x04   # CMD_SET_ZERO
-CMD_BUZZER_PLAY       = 0x05   # CMD_BEEP
-CMD_ERASE_FLASH       = 0x09   # CMD_ERASE_FLASH
-CMD_REQUEST_STATUS    = 0x0A   # CMD_GET_STATUS
-CMD_SET_QNH           = 0x0B   # CMD_SET_SEALEVEL_HPA  payload: float32 hPa
-CMD_SERVO_PARACHUTE   = 0x0C   # CMD_SERVO_PARACHUTE   one-shot 0→90→0
-CMD_SERVO_PAYLOAD     = 0x0D   # CMD_SERVO_PAYLOAD     one-shot CanSat release
-CMD_RESET_CONTROLLER  = 0x10   # CMD_RESET_MCU
-CMD_SET_TARGET_GPS    = 0x11   # CMD_SET_TARGET        payload: int32 latE7 + int32 lonE7
+CMD_START_TELEMETRY        = 0x02   # CMD_START_TX
+CMD_STOP_TELEMETRY         = 0x03   # CMD_STOP_TX
+CMD_SENSOR_ZERO            = 0x04   # CMD_SET_ZERO
+CMD_BUZZER_PLAY            = 0x05   # CMD_BEEP
+CMD_ERASE_FLASH            = 0x09   # CMD_ERASE_FLASH
+CMD_REQUEST_STATUS         = 0x0A   # CMD_GET_STATUS
+CMD_SET_QNH                = 0x0B   # CMD_SET_SEALEVEL_HPA  payload: float32 hPa
+
+# Avionics latch servo commands — stay open/closed (avionics only)
+CMD_SERVO_PARACHUTE_OPEN   = 0x0C   # CMD_SERVO_PARACHUTE_OPEN  — latch stays open
+CMD_SERVO_PAYLOAD_OPEN     = 0x0D   # CMD_SERVO_PAYLOAD_OPEN    — latch stays open
+CMD_SERVO_PARACHUTE_CLOSE  = 0x0E   # CMD_SERVO_PARACHUTE_CLOSE — latch stays closed
+CMD_SERVO_PAYLOAD_CLOSE    = 0x0F   # CMD_SERVO_PAYLOAD_CLOSE   — latch stays closed
+
+CMD_RESET_CONTROLLER       = 0x10   # CMD_RESET_MCU
+CMD_SET_TARGET_GPS         = 0x11   # CMD_SET_TARGET            payload: float32 lat + float32 lon
+
+# Common command — applies to avionics AND CanSat
+CMD_SET_BENCH_MODE         = 0x12   # CMD_SET_BENCH_MODE        payload: 1 byte (1=ON, 0=OFF)
 
 # CanSat-specific commands (relayed to CanSat channel only)
-CMD_GYRO_STAB_ON      = 0x12   # CMD_GYRO_ON   — turn on gyro stabilizer
-CMD_GYRO_STAB_OFF     = 0x13   # CMD_GYRO_OFF  — turn off gyro stabilizer
-CMD_BURN_NICHROME     = 0x14   # CMD_BURN_WIRE — burn nichrome wire
+CMD_GYRO_STAB_ON           = 0x13   # CMD_GYRO_ON   — turn on gyro stabilizer
+CMD_GYRO_STAB_OFF          = 0x14   # CMD_GYRO_OFF  — turn off gyro stabilizer
+CMD_BURN_NICHROME          = 0x15   # CMD_BURN_WIRE — burn nichrome wire
 
 # Human-readable names for debug/log display
 CMD_NAMES = {
-    CMD_START_TELEMETRY:  "start_Tx",
-    CMD_STOP_TELEMETRY:   "stop_Tx",
-    CMD_SENSOR_ZERO:      "calibrate",
-    CMD_BUZZER_PLAY:      "buzzer_play",
-    CMD_ERASE_FLASH:      "erase_flash",
-    CMD_REQUEST_STATUS:   "Status",
-    CMD_SET_QNH:          "Set_QNH",
-    CMD_SERVO_PARACHUTE:  "Servo_parachute",
-    CMD_SERVO_PAYLOAD:    "Servo_payload",
-    CMD_RESET_CONTROLLER: "Reset_controller",
-    CMD_SET_TARGET_GPS:   "Set_target_GPS",
-    CMD_GYRO_STAB_ON:     "Gyro_Stabilizer_ON",
-    CMD_GYRO_STAB_OFF:    "Gyro_Stabilizer_OFF",
-    CMD_BURN_NICHROME:    "Burn_Nichrome",
+    CMD_START_TELEMETRY:       "start_Tx",
+    CMD_STOP_TELEMETRY:        "stop_Tx",
+    CMD_SENSOR_ZERO:           "calibrate",
+    CMD_BUZZER_PLAY:           "buzzer_play",
+    CMD_ERASE_FLASH:           "erase_flash",
+    CMD_REQUEST_STATUS:        "Status",
+    CMD_SET_QNH:               "Set_QNH",
+    CMD_SERVO_PARACHUTE_OPEN:  "Servo_parachute_OPEN",
+    CMD_SERVO_PARACHUTE_CLOSE: "Servo_parachute_CLOSE",
+    CMD_SERVO_PAYLOAD_OPEN:    "Servo_payload_OPEN",
+    CMD_SERVO_PAYLOAD_CLOSE:   "Servo_payload_CLOSE",
+    CMD_RESET_CONTROLLER:      "Reset_controller",
+    CMD_SET_TARGET_GPS:        "Set_target_GPS",
+    CMD_SET_BENCH_MODE:        "Set_bench_mode",
+    CMD_GYRO_STAB_ON:          "Gyro_Stabilizer_ON",
+    CMD_GYRO_STAB_OFF:         "Gyro_Stabilizer_OFF",
+    CMD_BURN_NICHROME:         "Burn_Nichrome",
 }
 
 

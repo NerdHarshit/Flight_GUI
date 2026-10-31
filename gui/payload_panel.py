@@ -22,6 +22,7 @@ from core.command_manager import (
     CMD_BUZZER_PLAY, CMD_SENSOR_ZERO,
     CMD_RESET_CONTROLLER,
     CMD_SET_TARGET_GPS,
+    CMD_SET_BENCH_MODE,
     CMD_GYRO_STAB_ON, CMD_GYRO_STAB_OFF, CMD_BURN_NICHROME,
 )
 
@@ -227,6 +228,30 @@ class PayloadPanel(QWidget):
         self.btn_calibrate = _btn("calibrate", CMD_SENSOR_ZERO)
         lay.addWidget(self.btn_calibrate)
 
+        # --- Set Bench Mode (common: avionics + cansat) ---
+        bench_frame = QFrame()
+        bench_frame.setObjectName("Card")
+        bench_lay = QHBoxLayout(bench_frame)
+        bench_lay.setContentsMargins(6, 4, 6, 4)
+        bench_lay.setSpacing(4)
+        bench_lbl = QLabel("Bench:")
+        bench_lbl.setObjectName("FieldLabel")
+        bench_lbl.setFixedWidth(44)
+        self.btn_bench_on = QPushButton("ON")
+        self.btn_bench_off = QPushButton("OFF")
+        for b in (self.btn_bench_on, self.btn_bench_off):
+            b.setFixedHeight(26)
+            b.setStyleSheet(
+                "QPushButton { background-color:#1a1d24; color:#FFB347; "
+                "border:1px solid rgba(255,179,71,0.4); border-radius:6px; "
+                "font-size:11px; padding:2px 8px; }"
+                "QPushButton:hover { background-color:rgba(255,179,71,0.15); }"
+            )
+        bench_lay.addWidget(bench_lbl)
+        bench_lay.addWidget(self.btn_bench_on)
+        bench_lay.addWidget(self.btn_bench_off)
+        lay.addWidget(bench_frame)
+
         # --- Reset_controller ---
         self.btn_reset = _btn("Reset_controller", CMD_RESET_CONTROLLER, warning=True)
         lay.addWidget(self.btn_reset)
@@ -410,6 +435,12 @@ class PayloadPanel(QWidget):
             lambda: self.command_mgr.send_command(CMD_BUZZER_PLAY))
         self.btn_calibrate.clicked.connect(
             lambda: self.command_mgr.send_command(CMD_SENSOR_ZERO))
+
+        # Bench mode (common command)
+        self.btn_bench_on.clicked.connect(
+            lambda: self.command_mgr.send_command(CMD_SET_BENCH_MODE, bytes([0x01])))
+        self.btn_bench_off.clicked.connect(
+            lambda: self.command_mgr.send_command(CMD_SET_BENCH_MODE, bytes([0x00])))
 
         self.btn_reset.clicked.connect(self._confirm_reset)
         self.btn_additional.toggled.connect(self._toggle_flyout)

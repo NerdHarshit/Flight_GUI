@@ -32,8 +32,9 @@ from core.command_manager import (
     CommandManager,
     CMD_START_TELEMETRY, CMD_STOP_TELEMETRY, CMD_REQUEST_STATUS,
     CMD_BUZZER_PLAY, CMD_SENSOR_ZERO,
-    CMD_SERVO_PARACHUTE, CMD_SERVO_PAYLOAD, CMD_RESET_CONTROLLER,
-    CMD_SET_QNH,
+    CMD_SERVO_PARACHUTE_OPEN, CMD_SERVO_PARACHUTE_CLOSE,
+    CMD_SERVO_PAYLOAD_OPEN, CMD_SERVO_PAYLOAD_CLOSE,
+    CMD_RESET_CONTROLLER, CMD_SET_QNH, CMD_SET_BENCH_MODE,
     CMD_NAMES,
 )
 
@@ -267,15 +268,105 @@ class AvionicsPanel(QWidget):
         self.btn_calibrate = _btn("calibrate", CMD_SENSOR_ZERO)
         lay.addWidget(self.btn_calibrate)
 
-        # --- Servo_parachute (warning style) ---
-        self.btn_servo_para = _btn("Servo_parachute", CMD_SERVO_PARACHUTE, warning=True)
-        self.btn_servo_para.setToolTip("⚠ One-shot parachute servo cycle — confirm required")
-        lay.addWidget(self.btn_servo_para)
+        # --- Set Bench Mode (common: avionics + cansat) ---
+        bench_frame = QFrame()
+        bench_frame.setObjectName("Card")
+        bench_lay = QHBoxLayout(bench_frame)
+        bench_lay.setContentsMargins(6, 4, 6, 4)
+        bench_lay.setSpacing(4)
+        self.btn_bench_on = QPushButton("Bench ON")
+        self.btn_bench_off = QPushButton("Bench OFF")
+        for b in (self.btn_bench_on, self.btn_bench_off):
+            b.setFixedHeight(28)
+            b.setStyleSheet(
+                "QPushButton { background-color:#1a1d24; color:#FFB347; "
+                "border:1px solid rgba(255,179,71,0.4); border-radius:6px; "
+                "font-size:11px; padding:3px 6px; }"
+                "QPushButton:hover { background-color:rgba(255,179,71,0.15); }"
+            )
+        bench_lay.addWidget(self.btn_bench_on)
+        bench_lay.addWidget(self.btn_bench_off)
+        lay.addWidget(bench_frame)
 
-        # --- Servo_payload ---
-        self.btn_servo_payload = _btn("Servo_payload", CMD_SERVO_PAYLOAD)
-        self.btn_servo_payload.setToolTip("One-shot payload release servo cycle — confirm required")
-        lay.addWidget(self.btn_servo_payload)
+        # ── Latch Servo Section (avionics only) ──────────────────────
+        lay.addSpacerItem(QSpacerItem(0, 4))
+
+        servo_sep = QFrame()
+        servo_sep.setFrameShape(QFrame.Shape.HLine)
+        servo_sep.setStyleSheet("border: 1px solid rgba(187,134,252,0.3);")
+        lay.addWidget(servo_sep)
+
+        servo_label = QLabel("🔩  Latch Servos")
+        servo_label.setStyleSheet(
+            "color:#BB86FC; font-size:12px; font-weight:bold; padding:2px 0px;")
+        lay.addWidget(servo_label)
+
+        # Enable latch servos — requires confirmation; unlocks open/close buttons
+        self.btn_enable_servos = QPushButton("Enable Latch Servos")
+        self.btn_enable_servos.setFixedHeight(36)
+        self.btn_enable_servos.setMinimumWidth(148)
+        self.btn_enable_servos.setCheckable(True)
+        self.btn_enable_servos.setStyleSheet(
+            "QPushButton { background-color:#1e2128; color:#BB86FC; "
+            "border:2px solid rgba(187,134,252,0.5); border-radius:8px; "
+            "font-weight:bold; font-size:12px; padding:7px; }"
+            "QPushButton:checked { background-color:rgba(139,43,226,0.35); "
+            "border-color:#BB86FC; color:#fff; }"
+            "QPushButton:hover { background-color:rgba(139,43,226,0.2); }"
+        )
+        lay.addWidget(self.btn_enable_servos)
+
+        # CanSat payload latch
+        cansat_servo_lbl = QLabel("CanSat Latch")
+        cansat_servo_lbl.setStyleSheet(
+            "color:#888; font-size:10px; padding:0px 2px;")
+        lay.addWidget(cansat_servo_lbl)
+
+        cansat_row = QHBoxLayout()
+        cansat_row.setSpacing(4)
+        self.btn_payload_open = QPushButton("Open")
+        self.btn_payload_close = QPushButton("Close")
+        for b in (self.btn_payload_open, self.btn_payload_close):
+            b.setFixedHeight(32)
+            b.setEnabled(False)  # locked until servos enabled
+            b.setStyleSheet(
+                "QPushButton { background-color:#12141a; color:#aaa; "
+                "border:1px solid #333; border-radius:6px; "
+                "font-size:11px; padding:4px; }"
+                "QPushButton:enabled { background-color:#1a2a1a; color:#00FF88; "
+                "border-color:rgba(0,255,136,0.5); }"
+                "QPushButton:enabled:hover { background-color:#1e3a1e; }"
+                "QPushButton:disabled { color:#555; border-color:#222; }"
+            )
+        cansat_row.addWidget(self.btn_payload_open)
+        cansat_row.addWidget(self.btn_payload_close)
+        lay.addLayout(cansat_row)
+
+        # Parachute latch
+        para_servo_lbl = QLabel("Parachute Latch")
+        para_servo_lbl.setStyleSheet(
+            "color:#888; font-size:10px; padding:0px 2px;")
+        lay.addWidget(para_servo_lbl)
+
+        para_row = QHBoxLayout()
+        para_row.setSpacing(4)
+        self.btn_para_open = QPushButton("Open")
+        self.btn_para_close = QPushButton("Close")
+        for b in (self.btn_para_open, self.btn_para_close):
+            b.setFixedHeight(32)
+            b.setEnabled(False)  # locked until servos enabled
+            b.setStyleSheet(
+                "QPushButton { background-color:#12141a; color:#aaa; "
+                "border:1px solid #333; border-radius:6px; "
+                "font-size:11px; padding:4px; }"
+                "QPushButton:enabled { background-color:#2a1a0a; color:#FFB347; "
+                "border-color:rgba(255,179,71,0.5); }"
+                "QPushButton:enabled:hover { background-color:#3a2210; }"
+                "QPushButton:disabled { color:#555; border-color:#222; }"
+            )
+        para_row.addWidget(self.btn_para_open)
+        para_row.addWidget(self.btn_para_close)
+        lay.addLayout(para_row)
 
         # --- Reset_controller ---
         self.btn_reset = _btn("Reset_controller", CMD_RESET_CONTROLLER, warning=True)
@@ -348,24 +439,40 @@ class AvionicsPanel(QWidget):
         self.btn_calibrate.clicked.connect(
             lambda: self.command_mgr.send_command(CMD_SENSOR_ZERO))
         self.btn_set_qnh.clicked.connect(self._send_qnh)
-        self.btn_servo_para.clicked.connect(self._confirm_servo_para)
-        self.btn_servo_payload.clicked.connect(self._confirm_servo_payload)
+
+        # Bench mode buttons (common — no confirmation needed)
+        self.btn_bench_on.clicked.connect(
+            lambda: self.command_mgr.send_command(CMD_SET_BENCH_MODE, bytes([0x01])))
+        self.btn_bench_off.clicked.connect(
+            lambda: self.command_mgr.send_command(CMD_SET_BENCH_MODE, bytes([0x00])))
+
+        # Servo enable/disable toggle — enable requires confirmation
+        self.btn_enable_servos.toggled.connect(self._on_servo_enable_toggled)
+
+        # Servo open/close — no confirmation (enable gate is the guard)
+        self.btn_payload_open.clicked.connect(
+            lambda: self.command_mgr.send_command(CMD_SERVO_PAYLOAD_OPEN))
+        self.btn_payload_close.clicked.connect(
+            lambda: self.command_mgr.send_command(CMD_SERVO_PAYLOAD_CLOSE))
+        self.btn_para_open.clicked.connect(
+            lambda: self.command_mgr.send_command(CMD_SERVO_PARACHUTE_OPEN))
+        self.btn_para_close.clicked.connect(
+            lambda: self.command_mgr.send_command(CMD_SERVO_PARACHUTE_CLOSE))
+
         self.btn_reset.clicked.connect(self._confirm_reset)
         self.btn_additional.toggled.connect(self._toggle_flyout)
 
         # CommandManager state feedback → button visual state
         self.command_mgr.command_state_changed.connect(self._on_cmd_state)
 
-        # All command buttons registered
+        # All command buttons registered for state feedback
         self._cmd_buttons = {
-            CMD_START_TELEMETRY: self.btn_start_tx,
-            CMD_STOP_TELEMETRY:  self.btn_stop_tx,
-            CMD_REQUEST_STATUS:  self.btn_status,
-            CMD_BUZZER_PLAY:     self.btn_buzzer,
-            CMD_SENSOR_ZERO:     self.btn_calibrate,
-            CMD_SERVO_PARACHUTE: self.btn_servo_para,
-            CMD_SERVO_PAYLOAD:   self.btn_servo_payload,
-            CMD_RESET_CONTROLLER: self.btn_reset,
+            CMD_START_TELEMETRY:       self.btn_start_tx,
+            CMD_STOP_TELEMETRY:        self.btn_stop_tx,
+            CMD_REQUEST_STATUS:        self.btn_status,
+            CMD_BUZZER_PLAY:           self.btn_buzzer,
+            CMD_SENSOR_ZERO:           self.btn_calibrate,
+            CMD_RESET_CONTROLLER:      self.btn_reset,
         }
 
     # ──────────────────────────────────────────────────────────────────
@@ -401,26 +508,31 @@ class AvionicsPanel(QWidget):
         payload = struct.pack("<f", val)
         self.command_mgr.send_command(CMD_SET_QNH, payload)
 
-    def _confirm_servo_para(self):
-        ok = ConfirmationDialog.confirm(
-            self,
-            "Fire Parachute Servo",
-            "This will trigger the parachute bay servo (full 0→90→0° auto-cycle).\n"
-            "The avionics firmware handles the entire sequence — this cannot be undone.",
-            warning=True,
-        )
-        if ok:
-            self.command_mgr.send_command(CMD_SERVO_PARACHUTE)
+    def _on_servo_enable_toggled(self, checked: bool):
+        """Enable latch servos requires confirmation; open/close buttons follow."""
+        if checked:
+            ok = ConfirmationDialog.confirm(
+                self,
+                "Enable Latch Servos",
+                "This will arm the parachute and CanSat latch servos.\n"
+                "Open / Close buttons will become active.\n\n"
+                "Only enable on the launch pad or after landing.",
+                warning=True,
+            )
+            if not ok:
+                # Revert toggle without retriggering signal
+                self.btn_enable_servos.blockSignals(True)
+                self.btn_enable_servos.setChecked(False)
+                self.btn_enable_servos.blockSignals(False)
+                return
 
-    def _confirm_servo_payload(self):
-        ok = ConfirmationDialog.confirm(
-            self,
-            "Fire Payload Release Servo",
-            "This will trigger the CanSat release servo (full 0→90→0° auto-cycle).\n"
-            "The avionics firmware handles the entire sequence — this cannot be undone.",
-        )
-        if ok:
-            self.command_mgr.send_command(CMD_SERVO_PAYLOAD)
+        # Enable/disable open-close buttons
+        for b in (self.btn_payload_open, self.btn_payload_close,
+                  self.btn_para_open, self.btn_para_close):
+            b.setEnabled(checked)
+
+        self.btn_enable_servos.setText(
+            "Latch Servos ARMED ✓" if checked else "Enable Latch Servos")
 
     def _confirm_reset(self):
         ok = ConfirmationDialog.confirm(

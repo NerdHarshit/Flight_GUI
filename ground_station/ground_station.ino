@@ -70,13 +70,13 @@
 #define CMD_ERASE_FLASH       0x09
 #define CMD_GET_STATUS        0x0A
 #define CMD_SET_SEALEVEL_HPA  0x0B
-#define CMD_SERVO_PARACHUTE   0x0C
-#define CMD_SERVO_PAYLOAD     0x0D
+#define CMD_SERVO_PARACHUTE_OPEN   0x0C   // parachute latch -> open (stays open)
+#define CMD_SERVO_PAYLOAD_OPEN     0x0D   // CanSat latch    -> open (stays open)
+#define CMD_SERVO_PARACHUTE_CLOSE  0x0E   // parachute latch -> closed (pad / after landing only)
+#define CMD_SERVO_PAYLOAD_CLOSE    0x0F   // CanSat latch    -> closed (pad / after landing only)
 #define CMD_RESET_MCU         0x10
 #define CMD_SET_TARGET        0x11
-#define CMD_GYRO_ON           0x12
-#define CMD_GYRO_OFF          0x13
-#define CMD_BURN_WIRE         0x14
+#define CMD_SET_BENCH_MODE    0x12   // payload: 1 byte, 1 = bench ON, 0 = bench OFF (flight)
 
 enum Channel { CH_AVIONICS, CH_CANSAT };
 
@@ -214,8 +214,11 @@ struct AvionicsStatus {
     bool     ctrlBAlive;
     float    battV;
     uint8_t  flightNumber;
+    bool     benchMode;          // fills the old padding byte (crc stays at offset 14)
     uint16_t crc;
 };
+static_assert(sizeof(AvionicsStatus) == 16, "AvionicsStatus must match Controller A's StatusPacket (16 bytes)");
+static_assert(offsetof(AvionicsStatus, crc) == 14, "AvionicsStatus crc must be at offset 14");
 
 void handleAvionicsStatus(uint8_t* buf, int size) {
     if (size < 3 + (int)sizeof(AvionicsStatus)) return;
@@ -243,6 +246,10 @@ void handleAvionicsStatus(uint8_t* buf, int size) {
         st.battV, (unsigned)st.flightNumber,
         (int)lastRSSI, lastSNR);
     Serial.println(line);
+
+    // Separate line so the existing STATUS,... field layout the GUI parses is unchanged.
+    Serial.print("BENCH,");
+    Serial.println((unsigned)st.benchMode);
 }
 
 // ─── Avionics Packet Handler ──────────────────────────────────
@@ -386,16 +393,11 @@ void relayCommand(uint8_t type, uint16_t id, uint8_t* payload, uint8_t payLen) {
     frame[hdrPlusPayLen + 1] = (uint8_t)(cmdCRC & 0xFF);
     uint8_t totalLen = hdrPlusPayLen + 2;
 
-    // Identify if the command is exclusively for the CanSat
-    bool isCanSatOnly = (type == CMD_GYRO_ON || type == CMD_GYRO_OFF || type == CMD_BURN_WIRE);
-    
-    if(!isCanSatOnly){
-        // 1. Controller A (866 MHz)
-        sendFrameOnChannel(AVIONICS_FREQ, AVIONICS_SF, AVIONICS_SYNC_WORD,
+    // 1. Controller A (866 MHz)
+    sendFrameOnChannel(AVIONICS_FREQ, AVIONICS_SF, AVIONICS_SYNC_WORD,
                        frame, totalLen, CMD_REPEATS_AVIONICS);
 
-        delay(CMD_REPEAT_GAP_MS);
-    }
+    delay(CMD_REPEAT_GAP_MS);
 
     // 2. CanSat (868 MHz)
     sendFrameOnChannel(CANSAT_FREQ, CANSAT_SF, CANSAT_SYNC_WORD,
@@ -447,6 +449,7 @@ void parseSerialByte(uint8_t b) {
             cmdId |= ((uint16_t)b << 8);
             if      (cmdType == CMD_SET_SEALEVEL_HPA) cmdPayloadLen = 4;
             else if (cmdType == CMD_SET_TARGET)       cmdPayloadLen = 8;
+            else if (cmdType == CMD_SET_BENCH_MODE)   cmdPayloadLen = 1;
             else                                      cmdPayloadLen = 0;
 
             if (cmdPayloadLen == 0) {
@@ -474,7 +477,7 @@ void setup() {
     while (!Serial && millis() < 3000);
 
     Serial.println("GS_INFO: AvioPro Ground Station v2.3 (Full Command Tester)");
-    Serial.println("GS_INFO: Commands -> s:Start, t:Stop, z:Zero, b:Beep, p:Parachute, c:CanSat, g:Status, r:Reset, q:Set QNH, x:Set Target");
+    Serial.println("GS_INFO: Commands -> s:Start, t:Stop, z:Zero, b:Beep, p:Parachute OPEN, k:Parachute CLOSE, c:CanSat OPEN, l:CanSat CLOSE, m:Bench ON, n:Bench OFF, g:Status, r:Reset, q:Set QNH, x:Set Target");
 
     LoRa.setPins(LORA_NSS, LORA_RST, LORA_DIO0);
 
@@ -565,13 +568,33 @@ void loop() {
                 break;
             }
             case 'p': case 'P':
-                Serial.println("GS_INFO: [0x0C] CMD_SERVO_PARACHUTE");
-                handleCommand(CMD_SERVO_PARACHUTE, 1, nullptr, 0);
+                Serial.println("GS_INFO: [0x0C] CMD_SERVO_PARACHUTE_OPEN");
+                handleCommand(CMD_SERVO_PARACHUTE_OPEN, 1, nullptr, 0);
+                break;
+            case 'k': case 'K':
+                Serial.println("GS_INFO: [0x0E] CMD_SERVO_PARACHUTE_CLOSE");
+                handleCommand(CMD_SERVO_PARACHUTE_CLOSE, 1, nullptr, 0);
                 break;
             case 'c': case 'C':
-                Serial.println("GS_INFO: [0x0D] CMD_SERVO_PAYLOAD");
-                handleCommand(CMD_SERVO_PAYLOAD, 1, nullptr, 0);
+                Serial.println("GS_INFO: [0x0D] CMD_SERVO_PAYLOAD_OPEN");
+                handleCommand(CMD_SERVO_PAYLOAD_OPEN, 1, nullptr, 0);
                 break;
+            case 'l': case 'L':
+                Serial.println("GS_INFO: [0x0F] CMD_SERVO_PAYLOAD_CLOSE");
+                handleCommand(CMD_SERVO_PAYLOAD_CLOSE, 1, nullptr, 0);
+                break;
+            case 'm': case 'M': {
+                Serial.println("GS_INFO: [0x12] CMD_SET_BENCH_MODE = 1 (ON, pad/landed only)");
+                uint8_t on = 1;
+                handleCommand(CMD_SET_BENCH_MODE, 1, &on, 1);
+                break;
+            }
+            case 'n': case 'N': {
+                Serial.println("GS_INFO: [0x12] CMD_SET_BENCH_MODE = 0 (OFF, flight behaviour)");
+                uint8_t off = 0;
+                handleCommand(CMD_SET_BENCH_MODE, 1, &off, 1);
+                break;
+            }
             case 'r': case 'R':
                 Serial.println("GS_INFO: [0x10] CMD_RESET_MCU");
                 handleCommand(CMD_RESET_MCU, 1, nullptr, 0);
@@ -585,7 +608,6 @@ void loop() {
                 memcpy(targetPayload + 4, &lonE7, 4);
                 handleCommand(CMD_SET_TARGET, 1, targetPayload, 8);
                 break;
-            }
 
             case 'o': case 'O':
                 Serial.println("GS_INFO: [0x12] CMD_GYRO_ON (CanSat Only)");
@@ -600,6 +622,7 @@ void loop() {
                 handleCommand(CMD_BURN_WIRE, 1, nullptr, 0);
                 break;
                 
+            }
             default:
                 break;
         }

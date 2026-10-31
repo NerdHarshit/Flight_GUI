@@ -67,11 +67,11 @@
 //    - Mission sequence: apogee -> gyro on (/PYRO3, GP20). Descent
 //      through BURNWIRE_ALT_M AGL -> burn wire (/PYRO2, GP21) for
 //      BURNWIRE_ON_MS, parafoil opens, PARAFOIL_SETTLE_MS later the
-//      guidance loop takes over the two brake servos (GP19 / GP18).
+//      guidance loop takes over the single seesaw steering servo (GP18).
 //      Landing -> gyro off, servos neutral.
 //    - Guidance: great-circle bearing to target vs GPS course over
 //      ground, PD on the heading error with a Mamdani fuzzy gain
-//      scheduler, differential-brake mixer, dead-reckoning fallback
+//      scheduler, single-servo seesaw mixer, dead-reckoning fallback
 //      on GPS loss. Target is hardcoded (TARGET_LAT/LON_DEG) and can
 //      be overridden from the pad with CMD_SET_TARGET.
 //    - GPS: 38400 baud (verified on this board) and set to 5Hz /
@@ -81,6 +81,18 @@
 //      logging decimated to 1Hz so the pad wait can't fill storage.
 //    - BUGFIX: launch re-zero overwrote a SET_ZERO baseline with ~0,
 //      so AGL jumped to MSL at launch. Now shifts the baseline instead.
+//
+//  SINGLE-SERVO + LINK/ESC FIX PASS (this revision):
+//    - Steering is ONE seesaw servo on GPIO18 (see writeServos()).
+//    - LoRa half-duplex fix: the 103-byte telemetry frame is ~174ms on air
+//      at SF7/BW125 but was sent every 100ms, and a receive guard then
+//      blocked RX polling after each frame — so the cansat never listened
+//      while downlink was on. Telemetry now goes out every
+//      LORA_TX_INTERVAL_MS using ASYNC endPacket(true) (the loop no longer
+//      stalls); RX is polled every loop pass and never while a packet is on
+//      air; status packets are queued, not fired from the command handler.
+//    - Gyro flywheel ESC is now driven with a proper 50Hz / 1000-2000us
+//      servo signal (was 1kHz PWM, which an ESC rejects and beeps at).
 //  ----------------------------------------------------------------
 // ================================================================
 
@@ -107,18 +119,25 @@
 #define DEBUG_SERIAL
 
 // ----------------------------------------------------------------
-//  BENCH_TEST_MODE — LAB TESTING ONLY. REMOVE BEFORE REAL FLIGHT.
-//  1) Forces a clean slate on every boot (ignores any flight state
-//     saved in EEPROM from the previous run).
-//  2) Buzzer output is redirected to the onboard LED (GPIO26 here)
-//     since no physical buzzer is wired up on the bench.
-//  (There is no ARM command any more — launch detection is always live
-//  from LAUNCH_PAD, so this flag no longer auto-arms anything.)
-//  SAFETY: this does NOT disable deployment. If apogee is detected,
-//  both bay-door servos still move for real. Disconnect the servo
-//  linkage before running a full-sequence test on the bench.
-//  !! For the competition build this flag must be OFF so the startup
-//  !! beeps come out of the real buzzer — see notes in the changelog.
+//  BENCH MODE — now a RUNTIME setting (CMD_SET_BENCH_MODE 0x12, uplink; the
+//  same command and ID as Controller A), stored in EEPROM so it survives a
+//  reboot. No reflash needed at the pad.
+//    ON  : every boot forces a clean slate; EEPROM flight state is not even
+//          loaded (stale burnWireFired / deploymentFired flags can't leak in).
+//    OFF : flight behaviour — after a mid-flight reset the saved flight
+//          state is RESUMED.
+//  Rules (enforced in processCommand):
+//    - OFF is accepted in any state.
+//    - ON is accepted only on the pad (LAUNCH_PAD) or after landing (IMPACT).
+//    - Launch detection automatically switches bench mode OFF and saves it,
+//      so a forgotten flag can never wipe the flight state mid-flight.
+//  BENCH_MODE_DEFAULT is what a never-configured board starts with.
+//
+//  The #define below now only selects the buzzer wiring: ON routes the beep
+//  to GPIO26 (onboard LED stand-in) as well as the real buzzer on GPIO27.
+//  It no longer changes any flight/EEPROM behaviour.
+//  SAFETY: bench mode does NOT disable deployment. If the autonomous
+//  triggers fire, the burn wire / gyro still act for real.
 // ----------------------------------------------------------------
 #define BENCH_TEST_MODE
 
@@ -180,21 +199,22 @@
 // resonance, ~4 kHz for this part family. See buzzer_check.ino.
 #define BUZZER_RESONANT_HZ  4000
 
-// Parafoil brake-line servos (MG996R), powered from the +5V_SERVO buck.
-#define SERVO_LEFT_PIN     19   // /SERVO1 -> J10 — left brake line
-#define SERVO_RIGHT_PIN    18   // /SERVO2 -> J14 — right brake line
+// Parafoil steering servo (MG996R), powered from the +5V_SERVO buck.
+// ONE servo mounted mid-CanSat as a seesaw: horizontal at neutral, tilting
+// left/right pulls a drop line that in turn pulls the left/right brake line.
+#define SERVO_PIN          18   // /SERVO2 -> J14 — seesaw steering servo
 
 // Both pyro channels are IRLZ44N low-side switches (load between VBAT and
 // drain, 10k gate pulldown), so a Hi-Z / reset GPIO leaves the FET off.
 // GP20 and GP21 are the two halves of the same PWM slice, so they always
 // share one PWM frequency (PYRO_PWM_FREQ_HZ).
-#define PYRO_BURNWIRE_PIN  21   // /PYRO2 -> J11 — parafoil burn wire
-#define PYRO_GYRO_PIN      20   // /PYRO3 -> J12 — gyro motor (battery powered, PWM gate)
+#define PYRO_BURNWIRE_PIN  20   // /PYRO2 -> J11 — parafoil burn wire
+#define PYRO_GYRO_PIN      19  
 
 // ================================================================
 //  TUNING CONSTANTS
 // ================================================================
-#define SEALEVELPRESSURE_HPA 1012.50f
+#define SEALEVELPRESSURE_HPA 1015.30f
 
 #define BATT_VOLTAGE_DIVIDER 5.70f
 #define BATT_ADC_REF          3.3f
@@ -235,14 +255,20 @@
 #define FLASH_MAGIC_VAL          0xAF1010AF
 
 // -- LoRa --
-#define LORA_FREQUENCY         868E6
+#define LORA_FREQUENCY         867.75E6
 #define LORA_TX_POWER          14
-#define LORA_SPREADING_FACTOR  7
+#define LORA_SPREADING_FACTOR  8
 #define LORA_BANDWIDTH         125E3
 #define LORA_CODING_RATE       5
-#define LORA_SYNC_WORD         0xAF
+#define LORA_SYNC_WORD         0x92
 #define LORA_RX_WINDOW_MS      80
-#define LORA_TX_INTERVAL_MS    100
+// Telemetry downlink period. The radio is half-duplex: while it transmits
+// it cannot hear uplink commands. One 103-byte telemetry frame (99 wire +
+// 4 header) is ~174ms on air at SF7/BW125/CR4:5, so the period must exceed
+// that by a real listening gap or uplink commands never get in. 500ms =
+// 174ms TX + ~326ms listening. Lower it for faster telemetry, at the cost
+// of fewer command opportunities (re-check airtime if SF/BW change).
+#define LORA_TX_INTERVAL_MS    500
 #define LORA_PKT_SYNC_0        0xA5
 #define LORA_PKT_SYNC_1        0x5A
 // Uplink command frame, now variable length to carry command arguments:
@@ -262,6 +288,12 @@
 #define EEPROM_MAGIC_ADDR      0
 #define EEPROM_STATE_ADDR      4
 #define EEPROM_FLIGHTNUM_ADDR  64
+#define EEPROM_BENCH_ADDR      72      // 1 byte: BENCH_TAG_ON / BENCH_TAG_OFF (anything else = default)
+#define BENCH_TAG_OFF          0xB0
+#define BENCH_TAG_ON           0xB1
+#define BENCH_MODE_DEFAULT     true    // value for a board that was never configured by uplink
+
+bool benchMode = BENCH_MODE_DEFAULT;   // runtime flag, loaded from EEPROM in setup()
 
 // ================================================================
 //  CANSAT MISSION TUNING — everything set before a flight lives here
@@ -273,7 +305,12 @@
 #define BURNWIRE_ON_MS          3000     // single attempt, no retry
 #define BURNWIRE_ALT_M          600.0f   // AGL, only after apogee (on descent)
 #define BURNWIRE_CONFIRM_COUNT  5        // consecutive fresh baro samples at/below — 100ms at 50Hz
-#define GYRO_DUTY               255      // of PYRO_PWM_RANGE — 255 = 100%
+#define GYRO_DUTY               255      // of PYRO_PWM_RANGE — 255 = 100% throttle
+// The flywheel BLDC is driven through an ESC, which needs a hobby-servo
+// signal (50Hz, 1000-2000us pulse), NOT the 1kHz PWM the burn wire uses.
+// 1000us = zero throttle (also the arming signal), 2000us = full.
+#define ESC_MIN_US              1000
+#define ESC_MAX_US              2000
 #define PARAFOIL_SETTLE_MS      2000     // after the burn wire switches off, before steering starts
 
 // -- Target (great-circle bearing / haversine distance) --
@@ -284,7 +321,7 @@
 #define EARTH_RADIUS_M          6371000.0
 
 // -- PD core: u = (Kp0 + dKp) * e + (Kd0 + dKd) * edot --
-// u is servo degrees of differential brake; e in deg, edot in deg/s.
+// u is seesaw tilt in degrees of servo travel; e in deg, edot in deg/s.
 #define GUIDANCE_PERIOD_MS      200      // 5Hz — matches GPS_NAV_RATE_MS
 #define KP0                     2.5f
 #define KD0                     0.1f
@@ -314,13 +351,18 @@
 #define GYRO_YAW_SIGN           -1.0f
 #define GYRO_BIAS_ALPHA         0.01f    // gz bias tracked on the pad (rocket still on the rail)
 
-// -- Differential-brake mixer --
-// u > 0 (target to the right) pulls the right line, u < 0 the left.
-// Both start at 90 (neutral); left pulls towards 180, right is mirrored
-// and pulls towards 0.
+// -- Single-servo seesaw mixer --
+// u > 0 (target to the right) tilts the seesaw right (pulls the right line),
+// u < 0 tilts it left. 90 deg = seesaw horizontal, both lines slack.
+// Left pulls towards 180, right towards 0 (same sense as the old two-servo
+// mixer). Flip SERVO_TILT_DIR if the seesaw tilts the wrong way on the bench.
+// SERVO_MAX_TILT_DEG is the largest tilt from horizontal the linkage allows;
+// full guidance output (+/-U_MAX_DEG) maps onto it, so the control law is
+// untouched. Set to 40 so the horn stays within +/-40 deg of horizontal and
+// can't hit the platform base; writeServos() also hard-clamps to this.
 #define SERVO_NEUTRAL_DEG       90
-#define SERVO_LEFT_DIR          (+1)
-#define SERVO_RIGHT_DIR         (-1)
+#define SERVO_TILT_DIR          (-1)
+#define SERVO_MAX_TILT_DEG      40.0f
 
 // ================================================================
 //  ENUMS
@@ -352,6 +394,17 @@ enum LoRaCmd : uint8_t {
     // 0x0E-0x0F retired (separate open/close commands replaced by the single-cycle commands above)
     CMD_RESET_MCU        = 0x10,  // last-resort reset. Honored ONLY from LAUNCH_PAD (GUI confirms first)
     CMD_SET_TARGET       = 0x11,  // payload = int32 lat*1e7, int32 lon*1e7 (LE). Honored ONLY from LAUNCH_PAD
+
+    // -- common to Controller A and the CanSat --
+    CMD_SET_BENCH_MODE   = 0x12,  // payload = 1 byte: 1 = bench ON (clean slate each boot), 0 = OFF (flight)
+
+    // -- Added CanSat Uplink Commands --
+    // RENUMBERED: these were 0x12/0x13/0x14. 0x12 now belongs to CMD_SET_BENCH_MODE
+    // (shared with Controller A), so update the GUI buttons for these three.
+    CMD_GYRO_ON          = 0x13,  // Manual gyro toggle on (soft start)
+    CMD_GYRO_OFF         = 0x14,  // Manual gyro toggle off
+    CMD_BURN_WIRE        = 0x15   // Manual trigger for parafoil separation
+
 };
 
 // Downlink frames now carry an explicit type byte (3rd byte, right after the
@@ -513,8 +566,11 @@ struct StatusPacket {
     bool     ctrlBAlive;      // No Controller B in this test — always false
     float    battV;
     uint8_t  flightNumber;
+    bool     benchMode;       // fills the old padding byte: struct stays 16 bytes, crc stays at offset 14
     uint16_t crc;
 };
+static_assert(sizeof(StatusPacket) == 16, "StatusPacket must stay 16 bytes — ground station mirrors it");
+static_assert(offsetof(StatusPacket, crc) == 14, "StatusPacket crc offset must stay 14");
 
 struct LogEntry {
     uint32_t missionTime;
@@ -550,8 +606,8 @@ struct LogEntry {
     float    kpEff;
     float    kdEff;
     float    guidanceU;        // deg
-    uint8_t  servoLeft;        // commanded angle, deg
-    uint8_t  servoRight;
+    uint8_t  servoLeft;        // single steering servo's commanded angle, deg
+    uint8_t  servoRight;       // mirrored seesaw end (180 - servoLeft); kept so the log layout is unchanged
     uint8_t  guideFlags;       // GUIDE_FLAG_* bitmask
 };  // layout is the struct's natural (unpacked) one — decode with sizeof(LogEntry)
 
@@ -643,6 +699,11 @@ float    gpsCourseDeg   = 0.0f;
 float    gpsSpeedMps    = 0.0f;
 TinyGPSPlus gps;
 
+// -- Add these globals for gyro soft-start --
+float    gyroCurrentDuty   = 0.0f;
+bool     gyroRampingUp     = false;
+uint32_t gyroRampLastTick  = 0;
+
 // -- guidance --
 struct Guidance {
     bool     active;          // steering the servos
@@ -679,6 +740,8 @@ bool     loraTxEnabled  = false;
 uint8_t  loraTxSeq      = 0;
 uint8_t  loraLastRxSeq  = 0xFF;
 uint32_t loraLastTxTime = 0;
+uint32_t loraTxBusyUntil = 0;   // millis() when the async frame on air will have finished
+bool     statusTxPending = false;   // status packet queued; sent when the radio is idle
 
 // -- buzzer --
 uint32_t buzzerEndTime = 0;   // 0 = buzzer currently off
@@ -693,8 +756,8 @@ bool     firstTxSinceBoot    = true;   // true only until the very first CMD_STA
 Adafruit_BMP3XX bmp;
 #define MPU6500_ADDR 0x68
 MPU6500_WE mpu(&Wire1, MPU6500_ADDR);
-Servo servoLeft;         // left brake line
-Servo servoRight;        // right brake line
+Servo steerServo;        // seesaw steering servo (left/right brake lines via drop line)
+Servo gyroEsc;           // flywheel BLDC ESC signal (PYRO_GYRO_PIN), servo-style pulses
 
 SdFat sd;
 FsFile logFile;
@@ -709,7 +772,7 @@ Task taskSDFlush      = { 0, 450 };
 Task taskFlashFlush   = { 0, 550 };
 Task taskGPSDrain     = { 0,  20 };   //  50Hz UART drain — prevents overflow
 Task taskGPSValidate  = { 0, 200 };   //   5Hz fix validation + telemetry update
-Task taskLoRa         = { 0, 100 };   //  10Hz LoRa TX + RX window
+Task taskLoRa         = { 0, 100 };   //  UNUSED — LoRa is serviced every loop pass (taskLoRaTick)
 Task taskGuidance     = { 0, GUIDANCE_PERIOD_MS };   //   5Hz guidance loop
 uint8_t padLogCounter = 0;            // LOG_PAD_DECIMATION counter
 
@@ -907,6 +970,22 @@ void clearSavedState() {
     EEPROM.put(EEPROM_MAGIC_ADDR, blank);
     EEPROM.commit();
     DEBUG_PRINTLN(F("EEPROM: cleared"));
+}
+
+// Bench-mode flag lives in its own EEPROM byte, so clearSavedState() (which
+// only blanks the magic word) never touches it.
+void loadBenchFlag() {
+    uint8_t tag = 0;
+    EEPROM.get(EEPROM_BENCH_ADDR, tag);
+    if      (tag == BENCH_TAG_ON)  benchMode = true;
+    else if (tag == BENCH_TAG_OFF) benchMode = false;
+    else                           benchMode = BENCH_MODE_DEFAULT;
+}
+
+void saveBenchFlag(bool on) {
+    uint8_t tag = on ? BENCH_TAG_ON : BENCH_TAG_OFF;
+    EEPROM.put(EEPROM_BENCH_ADDR, tag);
+    EEPROM.commit();
 }
 
 // ================================================================
@@ -1662,25 +1741,63 @@ void pyroWrite(uint8_t pin, uint16_t duty) {
     }
 }
 
+// Gyro ESC throttle: duty 0..PYRO_PWM_RANGE -> ESC_MIN_US..ESC_MAX_US.
+// Never detach/park the pin LOW while the ESC is powered — no signal makes
+// it beep continuously. Idle is a steady 1000us pulse.
+void gyroWrite(uint16_t duty) {
+    if (duty > PYRO_PWM_RANGE) duty = PYRO_PWM_RANGE;
+    uint16_t us = ESC_MIN_US + (uint32_t)duty * (ESC_MAX_US - ESC_MIN_US) / PYRO_PWM_RANGE;
+    gyroEsc.writeMicroseconds(us);
+}
+
 void initPyros() {
     pyroWrite(PYRO_BURNWIRE_PIN, 0);
-    pyroWrite(PYRO_GYRO_PIN, 0);
+    // Start sending the 1000us idle pulse right at boot so the ESC arms
+    // (it needs ~1-3s of valid zero-throttle before it accepts throttle).
+    gyroEsc.attach(PYRO_GYRO_PIN, ESC_MIN_US, ESC_MAX_US);
+    gyroWrite(0);
     analogWriteFreq(PYRO_PWM_FREQ_HZ);
     analogWriteRange(PYRO_PWM_RANGE);
 }
 
 void startGyro() {
-    DEBUG_PRINTLN(F("GYRO: on"));
-    pyroWrite(PYRO_GYRO_PIN, GYRO_DUTY);
-    gyroOn = true;
+    if (!gyroOn) {
+        DEBUG_PRINTLN(F("GYRO: on (soft start initiated)"));
+        gyroOn = true;
+        gyroRampingUp = true;
+        gyroCurrentDuty = 0.0f;
+        gyroRampLastTick = millis();
+    }
 }
 
 void stopGyro() {
     if (gyroOn) {
         DEBUG_PRINTLN(F("GYRO: off"));
     }
-    pyroWrite(PYRO_GYRO_PIN, 0);
+    gyroWrite(0);
     gyroOn = false;
+    gyroRampingUp = false;
+    gyroCurrentDuty = 0.0f;
+}
+
+
+// -- Add this function to process the soft-start ramp --
+void updateGyroRamp(uint32_t now) {
+    if (gyroRampingUp && gyroOn) {
+        if (now - gyroRampLastTick >= 20) { // 50Hz update rate
+            float dt = (now - gyroRampLastTick) / 1000.0f;
+            gyroRampLastTick = now;
+            
+            // Ramp up to GYRO_DUTY (255) over ~2 seconds (127.5 units/sec)
+            gyroCurrentDuty += 127.5f * dt;
+            if (gyroCurrentDuty >= GYRO_DUTY) {
+                gyroCurrentDuty = (float)GYRO_DUTY;
+                gyroRampingUp = false; // ramp finished
+                DEBUG_PRINTLN(F("GYRO: soft start complete"));
+            }
+            gyroWrite((uint16_t)gyroCurrentDuty);
+        }
+    }
 }
 
 // Latches and saves burnWireFired BEFORE energising the wire, so a reset
@@ -1709,28 +1826,26 @@ void updateBurnWire(uint32_t now) {
 }
 
 // ================================================================
-//  DIFFERENTIAL-BRAKE SERVO MIXER
-//  u > 0 (target to the right) pulls the right line by |u| degrees,
-//  u < 0 pulls the left. The other line stays at neutral.
+//  SINGLE-SERVO SEESAW MIXER
+//  The servo is a seesaw at the middle of the CanSat, horizontal at 90 deg.
+//  u > 0 (target to the right) tilts it right, pulling the drop line and
+//  so the right brake line; u < 0 tilts it left. Tilt is proportional to u,
+//  so the opposite line goes slack as the seesaw rises on that side.
 // ================================================================
 void writeServos(float u) {
-    float mag = fabsf(u);
-    if (mag > U_MAX_DEG) mag = U_MAX_DEG;
+    u = constrain(u, -U_MAX_DEG, U_MAX_DEG);
+    float tilt = u * (SERVO_MAX_TILT_DEG / U_MAX_DEG);   // signed, +ve = right
 
-    int left  = SERVO_NEUTRAL_DEG;
-    int right = SERVO_NEUTRAL_DEG;
-    if (u > 0.0f) {
-        right += SERVO_RIGHT_DIR * (int)lroundf(mag);
-    } else if (u < 0.0f) {
-        left  += SERVO_LEFT_DIR  * (int)lroundf(mag);
-    }
-    left  = constrain(left,  0, 180);
-    right = constrain(right, 0, 180);
+    int angle = SERVO_NEUTRAL_DEG + SERVO_TILT_DIR * (int)lroundf(tilt);
+    // Hard mechanical limit: never beyond +/-SERVO_MAX_TILT_DEG of horizontal,
+    // so the horn can't strike the platform base. Every servo write goes
+    // through here (guidance, neutral, manual), so this is the one clamp.
+    angle = constrain(angle, SERVO_NEUTRAL_DEG - (int)SERVO_MAX_TILT_DEG,
+                             SERVO_NEUTRAL_DEG + (int)SERVO_MAX_TILT_DEG);
 
-    servoLeft.write(left);
-    servoRight.write(right);
-    guide.servoLeft  = (uint8_t)left;
-    guide.servoRight = (uint8_t)right;
+    steerServo.write(angle);
+    guide.servoLeft  = (uint8_t)angle;          // the one servo's command
+    guide.servoRight = (uint8_t)(180 - angle);  // mirrored seesaw end (log/CSV layout kept)
 }
 
 void servosNeutral() {
@@ -1997,6 +2112,10 @@ void updateStateMachine() {
                 altitudeFiltered -= padOffset;
                 previousAltitude -= padOffset;
                 telemetry.maxAltitude = 0.0f;   // fresh peak tracking starts exactly at launch
+                if (benchMode) {                // never carry bench mode into flight: a mid-flight
+                    benchMode = false;          // reset must RESUME the saved state, not wipe it
+                    saveBenchFlag(false);
+                }
                 saveState();
                 setState(ASCENT);
                 scheduleBeep(100);
@@ -2221,6 +2340,42 @@ void processCommand(uint8_t cmdId, uint8_t seq, const uint8_t* payload, uint8_t 
             }
             break;
 
+        case CMD_SET_BENCH_MODE: {
+            if (payloadLen != 1 || payload[0] > 1) {
+                DEBUG_PRINTLN(F("CMD: SET_BENCH_MODE rejected — payload must be 1 byte, 0 or 1"));
+                break;
+            }
+            bool want = (payload[0] == 1);
+            // Turning bench ON in flight would make a mid-flight reset wipe the
+            // saved flight state, so ON is only honored on the pad / after landing.
+            if (want && !(state == LAUNCH_PAD || state == IMPACT)) {
+                DEBUG_PRINTLN(F("CMD: SET_BENCH_MODE ON refused — only on pad / after landing"));
+                break;
+            }
+            benchMode = want;
+            saveBenchFlag(want);
+            scheduleBeep(want ? 300 : 100);
+            DEBUG_PRINT(F("CMD: SET_BENCH_MODE = "));
+            DEBUG_PRINTLN(want ? F("ON (clean slate every boot)") : F("OFF (flight: resume after reset)"));
+            sendStatusPacket();   // status frame carries the flag so the ground station can confirm it
+            break;
+        }
+
+        case CMD_GYRO_ON:
+            startGyro();
+            DEBUG_PRINTLN(F("CMD: GYRO_ON"));
+            break;
+
+        case CMD_GYRO_OFF:
+            stopGyro();
+            DEBUG_PRINTLN(F("CMD: GYRO_OFF"));
+            break;
+
+        case CMD_BURN_WIRE:
+            fireBurnWire();  // Latch is built-in; autonomous 600m trigger will cleanly bypass if already fired
+            DEBUG_PRINTLN(F("CMD: BURN_WIRE"));
+            break;
+
         default:
             DEBUG_PRINT(F("CMD: unknown 0x"));
             DEBUG_PRINTLN2(cmdId, HEX);
@@ -2274,26 +2429,47 @@ void buildTelemetryWire(TelemetryWire& w) {
     w.crc = calculateCRC((const uint8_t*)&w, offsetof(TelemetryWire, crc));
 }
 
+// LoRa time-on-air (ms) for a frame of payloadBytes, from the radio settings
+// above (explicit header, CRC on, 8-symbol preamble) plus a 15ms safety
+// margin. If it came out short, parsePacket() would abort the frame on air.
+uint32_t loraAirtimeMs(uint16_t payloadBytes) {
+    const int   sf   = LORA_SPREADING_FACTOR;
+    const float tsym = (float)(1UL << sf) * 1000.0f / (float)LORA_BANDWIDTH;   // ms
+    const int   de   = (tsym > 16.0f) ? 1 : 0;                                  // low-data-rate optimise
+    const int   num  = 8 * (int)payloadBytes - 4 * sf + 28 + 16;
+    const int   den  = 4 * (sf - 2 * de);
+    const int   nsym = (num > 0) ? ((num + den - 1) / den) * LORA_CODING_RATE : 0;
+    const float total = (8.0f + 4.25f + 8.0f + (float)nsym) * tsym;
+    return (uint32_t)(total + 0.999f) + 15;
+}
+
 void sendLoRaTelemetry() {
     if (!loraReady || !loraTxEnabled) return;
 
     TelemetryWire wire;
     buildTelemetryWire(wire);
 
-    LoRa.beginPacket();
+    if (!LoRa.beginPacket()) return;   // radio still busy — try again next pass
     LoRa.write(LORA_PKT_SYNC_0);
     LoRa.write(LORA_PKT_SYNC_1);
     LoRa.write(PKT_TELEMETRY);
     LoRa.write(loraTxSeq++);
     LoRa.write((const uint8_t*)&wire, sizeof(TelemetryWire));
-    LoRa.endPacket(false);   // non-blocking TX
+    // endPacket(true) = ASYNC: returns at once and the radio sends in the
+    // background. (In the Sandeep Mistry LoRa library endPacket(false) is the
+    // BLOCKING one — it would stall the whole loop for the ~174ms airtime,
+    // starving the 50Hz yaw integration and the GPS UART drain.)
+    // This library version keeps isTransmitting() private, so the end of the
+    // frame is tracked by time: taskLoRaTick() leaves the radio alone until
+    // loraTxBusyUntil (computed from the real airtime).
+    LoRa.endPacket(true);
+    loraTxBusyUntil = millis() + loraAirtimeMs(sizeof(TelemetryWire) + 4);
 
     loraLastTxTime = millis();
 }
 
 void checkLoRaRx() {
     if (!loraReady) return;
-    if (millis() - loraLastTxTime < LORA_RX_WINDOW_MS) return;
 
     int packetSize = LoRa.parsePacket();
     if (packetSize < LORA_CMD_MIN_LEN) return;
@@ -2352,9 +2528,28 @@ void checkLoRaRx() {
     processCommand(cmdId, seq, payload, len);
 }
 
+bool transmitStatusPacket();   // fwd decl — defined with the status packet below
+
+// Half-duplex scheduler, called EVERY loop pass (not rate-limited):
+//  1. A packet on air is never touched (tracked by loraTxBusyUntil).
+//     parsePacket() would force the radio into RX and kill the transmission.
+//  2. Listen first, so a command that just arrived is handled before we
+//     start another transmission (beginPacket() aborts any RX in progress).
+//  3. Then at most one transmission: a queued status packet first, else
+//     telemetry when its period is up.
 void taskLoRaTick() {
-    sendLoRaTelemetry();
+    if (!loraReady) return;
+    if ((int32_t)(millis() - loraTxBusyUntil) < 0) return;   // frame still on air
+
     checkLoRaRx();
+
+    if (statusTxPending) {
+        if (transmitStatusPacket()) statusTxPending = false;
+        return;
+    }
+    if (loraTxEnabled && millis() - loraLastTxTime >= LORA_TX_INTERVAL_MS) {
+        sendLoRaTelemetry();
+    }
 }
 
 // ================================================================
@@ -2376,6 +2571,7 @@ StatusPacket buildStatusPacket() {
     sp.ctrlBAlive   = false;            // no Controller B on the CanSat — field kept for the GS layout
     sp.battV        = readBatteryVoltage();
     sp.flightNumber = flightNumber;
+    sp.benchMode    = benchMode;
 
     sp.crc = calculateCRC(
         (const uint8_t*)&sp,
@@ -2388,7 +2584,14 @@ StatusPacket buildStatusPacket() {
 // CMD_GET_STATUS (any time) and once automatically on the first CMD_START_TX
 // after boot. Never called from setup() directly — no packet goes on air
 // until the GUI asks for one, per the plug-and-play/no-surprise-traffic rule.
+// Called from the command handler: only QUEUES the packet. The actual
+// transmission happens from taskLoRaTick() once the radio is idle, so it can
+// never collide with a telemetry frame that is still on air.
 void sendStatusPacket() {
+    statusTxPending = true;
+}
+
+bool transmitStatusPacket() {
     StatusPacket sp = buildStatusPacket();
 
     Serial.print(F("STATUS bmp="));   Serial.print(sp.bmpOK);
@@ -2400,14 +2603,16 @@ void sendStatusPacket() {
     Serial.print(F(" batt="));        Serial.print(sp.battV, 2);
     Serial.print(F(" flt#"));         Serial.println(sp.flightNumber);
 
-    if (loraReady) {
-        LoRa.beginPacket();
-        LoRa.write(LORA_PKT_SYNC_0);
-        LoRa.write(LORA_PKT_SYNC_1);
-        LoRa.write(PKT_STATUS);
-        LoRa.write((const uint8_t*)&sp, sizeof(StatusPacket));
-        LoRa.endPacket(false);
-    }
+    if (!loraReady) return true;     // nothing to send on a dead radio — drop it
+    if (!LoRa.beginPacket()) return false;   // busy — stays queued
+    LoRa.write(LORA_PKT_SYNC_0);
+    LoRa.write(LORA_PKT_SYNC_1);
+    LoRa.write(PKT_STATUS);
+    LoRa.write((const uint8_t*)&sp, sizeof(StatusPacket));
+    LoRa.endPacket(true);   // async — see sendLoRaTelemetry()
+    loraTxBusyUntil = millis() + loraAirtimeMs(sizeof(StatusPacket) + 4);
+    loraLastTxTime = millis();
+    return true;
 }
 
 // Boot-time GO/NO-GO verdict for the startup beep sequence ONLY — does NOT
@@ -2455,24 +2660,22 @@ void setup() {
 
     EEPROM.begin(256);
     setTarget(TARGET_LAT_DEG, TARGET_LON_DEG);   // loadState() may override with a LoRa-set target
-    #ifdef BENCH_TEST_MODE
-        // Lab testing only: always start from a clean slate. EEPROM is not
-        // even loaded — loading it and then ignoring the state would still
-        // carry stale flags (burnWireFired, deploymentFired, ...) into the
-        // next bench run and silently skip those events. Real flight builds
-        // must NOT do this — resuming after an in-flight reboot is intended.
-        bool resumed = false;
-    #else
-        bool resumed = loadState();
-    #endif
+    loadBenchFlag();
+    // Runtime bench mode (uplink-settable, stored in EEPROM). ON: always start
+    // from a clean slate — EEPROM is not even loaded, since loading it and then
+    // ignoring the state would still carry stale flags (burnWireFired,
+    // deploymentFired, ...) into the next bench run and silently skip those
+    // events. OFF (flight): resuming after an in-flight reboot is intended.
+    bool resumed = benchMode ? false : loadState();
+    Serial.println(benchMode ? F("BENCH MODE ON — clean slate every boot")
+                             : F("BENCH MODE OFF — flight behaviour, saved state resumes after a reset"));
 
     pinMode(BUZZER_PIN,    OUTPUT);
     digitalWrite(BUZZER_PIN, LOW);
     pinMode(BUZZER_PIN_actual, OUTPUT);   // was never configured — DC digitalWrite()
     digitalWrite(BUZZER_PIN_actual, LOW); // calls were also silently no-op'ing on it
-    servoLeft.attach(SERVO_LEFT_PIN);
-    servoRight.attach(SERVO_RIGHT_PIN);
-    servosNeutral();                            // brake lines neutral until guidance starts
+    steerServo.attach(SERVO_PIN);
+    servosNeutral();                            // seesaw horizontal until guidance starts
 
     // --- Wire1: BMP390 + MPU6500 ---
     Wire1.setSDA(BMP_IMU_SDA);
@@ -2624,7 +2827,7 @@ void setup() {
 //    7.  Build + push        — 10Hz packet assembly + ring write
 //    8.  SD flush            — ~2Hz, watchdog pet inside
 //    9.  Flash flush         — ~2Hz, watchdog pet inside
-//    10. LoRa TX+RX          — 10Hz
+//    10. LoRa TX+RX          — RX polled every pass, TX every LORA_TX_INTERVAL_MS
 //    11. GPS validate        — 5Hz fix quality check
 //    12. Guidance            — 5Hz, right after the GPS validate
 //    13. Serial CSV          — 5Hz debug output
@@ -2638,6 +2841,7 @@ void loop() {
 
     taskBuzzerTick(now);
     updateBurnWire(now);
+    updateGyroRamp(now);
 
     if (runTask(taskGPSDrain, now)) {
         drainGPS();
@@ -2669,10 +2873,7 @@ void loop() {
         flushToFlash();
     }
 
-    if (runTask(taskLoRa, now)) {
-        taskLoRaTick();
-    }
-
+    taskLoRaTick();   // every pass — RX must be polled continuously, TX paces itself
     if (runTask(taskGPSValidate, now)) {
         validateGPS();
     }
